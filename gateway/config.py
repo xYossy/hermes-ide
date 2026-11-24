@@ -420,6 +420,7 @@ class ChannelOverride:
     model: Optional[str] = None
     provider: Optional[str] = None
     system_prompt: Optional[str] = None
+    runtime_footer: Optional[bool] = None  # False suppresses the runtime-metadata footer on this channel's final replies.
 
     def to_dict(self) -> Dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}

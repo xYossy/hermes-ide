@@ -1731,6 +1731,18 @@ class GatewayTurnMixin:
         effort = cfg.get("effort")
         return effort if isinstance(effort, str) and effort else None
 
+    def _runtime_footer_suppressed(self, source) -> bool:
+        """Return True when the channel override disables the runtime footer."""
+        cfg = getattr(self, "config", None)
+        if cfg is None or source is None:
+            return False
+        try:
+            from gateway.run import _get_channel_override
+            override = _get_channel_override(cfg, source.platform, str(source.chat_id or ""), thread_id=str(source.thread_id) if getattr(source, "thread_id", None) else None, parent_id=str(source.parent_chat_id) if getattr(source, "parent_chat_id", None) else None)
+            return bool(override and override.runtime_footer is False)
+        except Exception:
+            return False
+
     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
         """Runtime-metadata footer for the FINAL message of the turn; always on."""
         from gateway.run import logger
@@ -4315,6 +4327,8 @@ class GatewayTurnMixin:
                     )
                 except Exception as _footer_err:
                     logger.debug("runtime_footer build failed: %s", _footer_err)
+                    _footer_line = ""
+                if self._runtime_footer_suppressed(source):
                     _footer_line = ""
                 if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                     response = f"{response}\n\n{_footer_line}"

@@ -11,7 +11,9 @@ from gateway.config import (
     PlatformConfig,
 )
 from gateway.run import _get_channel_override, GatewayRunner
+from gateway.run_turn import GatewayTurnMixin
 from gateway.session import SessionSource
+from types import SimpleNamespace
 
 
 class TestGetChannelOverride:
@@ -153,4 +155,43 @@ class TestResolveSessionAgentRuntimePriority:
         assert model == "channel/model"
         assert runtime["provider"] == "openrouter"
 
+
+class TestRuntimeFooterSuppression:
+    def test_suppressed_when_override_runtime_footer_false(self):
+        ov = ChannelOverride(runtime_footer=False)
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(
+                    enabled=True,
+                    channel_overrides={"1234567890": ov},
+                ),
+            },
+        )
+        self_obj = SimpleNamespace(config=config)
+        source = SimpleNamespace(
+            platform=Platform.DISCORD,
+            chat_id="1234567890",
+            thread_id=None,
+            parent_chat_id=None,
+        )
+        assert GatewayTurnMixin._runtime_footer_suppressed(self_obj, source) is True
+
+    def test_not_suppressed_without_runtime_footer(self):
+        ov = ChannelOverride()
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(
+                    enabled=True,
+                    channel_overrides={"1234567890": ov},
+                ),
+            },
+        )
+        self_obj = SimpleNamespace(config=config)
+        source = SimpleNamespace(
+            platform=Platform.DISCORD,
+            chat_id="1234567890",
+            thread_id=None,
+            parent_chat_id=None,
+        )
+        assert GatewayTurnMixin._runtime_footer_suppressed(self_obj, source) is False
 
