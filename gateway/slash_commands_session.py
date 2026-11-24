@@ -181,6 +181,18 @@ class GatewaySessionCommandsMixin:
         _old_sid = old_entry.session_id if old_entry else None
         await self._fire_session_reset_hooks(source, session_key, _old_sid,
                                              new_entry.session_id if new_entry else None)
+        # Silence the /new banner: react on the invoking message instead when the adapter can.
+        # Titled resets keep the banner, it is what reports a rejected/duplicate title.
+        if not event.get_command_args().strip():
+            adapter = self._adapter_for_source(source)
+            add_reaction = getattr(adapter, "_add_reaction", None)
+            raw = getattr(event, "raw_message", None)
+            if callable(add_reaction) and raw is not None:
+                try:
+                    await add_reaction(raw, "🔄")
+                    return EphemeralReply("")
+                except Exception:
+                    logger.debug("reset reaction failed; falling back to the banner", exc_info=True)
         # Scoped to the profile serving this source so a multiplexed /new banner reports the
         # profile's model, not the base config's.
         try:

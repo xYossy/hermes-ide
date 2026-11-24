@@ -13,7 +13,7 @@ Put `BROWSER_SIDEBAR_TOKEN` in `/root/.hermes/secrets/browser-sidebar.env`.
 Do not commit the token.
 
 The hub listens on port **8796**, path `/ws`. Point the extension at
-`ws://server.tailea4ecb.ts.net:8796/ws`.
+`ws://192.168.2.201:8796/ws`.
 
 ## Hub lifecycle and deployment
 

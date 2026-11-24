@@ -521,6 +521,18 @@ def _fetch_member(
         matches = [m for m in matches if isinstance(m, dict)]
         if not matches:
             return None, f"no guild member matches {member_prefix!r}"
+        if len(matches) > 1:
+            # A prefix is not an identity: grant access by user_id instead of
+            # silently picking whoever Discord listed first.
+            candidates = ", ".join(
+                f"{(m.get('user') or {}).get('username') or '?'} "
+                f"({(m.get('user') or {}).get('id') or '?'})"
+                for m in matches[:5]  # shortcut: only 5 shown, extend if guilds get crowded
+            )
+            return None, (
+                f"ambiguous member prefix {member_prefix!r}: {len(matches)} members "
+                f"match ({candidates}); pass user_id to choose one"
+            )
         return matches[0], None
 
     return None, "member required: pass user_id or member (name prefix)"

@@ -154,6 +154,32 @@ class TestGoalManager:
         assert "port goal command to hermes" in prompt
         assert prompt.strip()  # non-empty
 
+    def test_continuation_prompt_carries_judge_rejection(self, hermes_home):
+        """A CONTINUE verdict's reason must reach the agent: the judge is stateless, so without it
+        the agent repeats the rejected answer and the judge repeats the same objection."""
+        from hermes_cli import goals
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="judge-reject-sid", default_max_turns=20)
+        mgr.set("ship the feature")
+        reason = "tests/test_feature.py has no assertion for the empty-input case"
+
+        with patch.object(goals, "judge_goal", return_value=("continue", reason, False, None, False)):
+            mgr.evaluate_after_turn("I implemented it.")
+            prompt = mgr.next_continuation_prompt()
+            assert reason in prompt
+            assert prompt.startswith("[Continuing toward your standing goal")
+
+            mgr.evaluate_after_turn("I implemented it again.")
+            assert mgr.state.judge_repeat == 2
+            prompt = mgr.next_continuation_prompt()
+            assert "2 turns in a row" in prompt
+            assert prompt.startswith("[Continuing toward your standing goal")
+
+        with patch.object(goals, "judge_goal", return_value=("done", "all cases covered", False, None, False)):
+            mgr.evaluate_after_turn("Added the empty-input test; it passes.")
+        assert mgr.state.judge_repeat == 0
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Smoke: CommandDef is wired
@@ -1031,3 +1057,49 @@ def test_goal_session_db_is_the_registry_shared_handle(hermes_home):
     finally:
         goals._DB_CACHE.clear()
         registry.release_or_close(db)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# /goalstop · /goalstart — global kill switch (sentinel file, hot toggle)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_goals_off_sentinel_roundtrip(hermes_home):
+    from hermes_cli import goals
+
+    assert goals.goals_disabled() is False
+    assert goals.set_goals_disabled(True) is True
+    assert goals.goals_disabled() is True
+    assert goals.goals_off_path().exists()
+    # Already off: no state change, so the gateway can reply "already off".
+    assert goals.set_goals_disabled(True) is False
+    assert goals.set_goals_disabled(False) is True
+    assert goals.goals_disabled() is False
+    assert not goals.goals_off_path().exists()
+    assert goals.set_goals_disabled(False) is False
+
+
+def test_goals_off_gates_loop_without_touching_goal(hermes_home):
+    from hermes_cli import goals
+    from hermes_cli.goals import GoalManager
+
+    mgr = GoalManager(session_id="goals-off-sid", default_max_turns=20)
+    mgr.set("ship it")
+    with patch.object(goals, "judge_goal", return_value=("continue", "needs work", False, None, False)):
+        goals.set_goals_disabled(True)
+        decision = mgr.evaluate_after_turn("still working")
+        assert decision["should_continue"] is False
+        assert decision["verdict"] == "skipped"
+        assert mgr.state.turns_used == 0
+        assert mgr.state.status == "active"
+
+        goals.set_goals_disabled(False)
+        decision = mgr.evaluate_after_turn("still working")
+        assert decision["should_continue"] is True
+
+
+def test_goalstop_goalstart_are_registered_commands():
+    from hermes_cli.commands import resolve_command
+
+    assert resolve_command("goalstop") is not None
+    assert resolve_command("goalstart") is not None

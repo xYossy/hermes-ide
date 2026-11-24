@@ -29,7 +29,8 @@ from gateway.config import (
     DEFAULT_STREAMING_CURSOR as _DEFAULT_STREAMING_CURSOR)
 from gateway.response_filters import (
     is_intentional_silence_response as _is_intentional_silence_response,
-    is_partial_silence_marker as _is_partial_silence_marker)
+    is_partial_silence_marker as _is_partial_silence_marker,
+    strip_model_control_tokens)
 from gateway.stream_consumer_fences import ensure_closed_code_fences
 from gateway.stream_consumer_transport import StreamTransportMixin
 from gateway.stream_consumer_fallback import StreamFallbackMixin
@@ -1181,8 +1182,9 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
     # non-streaming paths share the same regex, so a tag is treated identically whichever path delivered the
     # text.
     def _clean_for_display(text: str) -> str:
-        """Hide MEDIA:<path> directives; media is delivered post-stream."""
-        return _BasePlatformAdapter.strip_media_directives_for_display(text)
+        """Hide MEDIA:<path> directives and any leaked model control tokens."""
+        return strip_model_control_tokens(
+            _BasePlatformAdapter.strip_media_directives_for_display(text))
 
     # ── fork overrides on the transport mixin (reply-ping only on the final answer,
     # ── QuixThe2nd/hermes-ide #48) ─────────────────────────────────────────

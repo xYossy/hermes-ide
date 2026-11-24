@@ -18,6 +18,25 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 
+# systemd-run in the system scope goes through polkit and times out on a desktop
+# box; the user manager accepts it and its units still sit outside the gateway's
+# service cgroup. Try the system scope first, then keep whatever worked.
+def _scope_order() -> list[list[str]]:
+    """User manager first when we already run under user@.service: its units sit
+    outside the gateway cgroup as well, and the system scope needs polkit, which
+    times out when nobody is at the machine to answer."""
+    try:
+        cgroup = Path("/proc/self/cgroup").read_text()
+    except OSError:
+        return [[], ["--user"]]
+    if "/user.slice/" in cgroup or "user@0" in cgroup:
+        return [["--user"], []]
+    return [[], ["--user"]]
+
+
+_SCOPES: list[list[str]] = _scope_order()
+
+
 def caller_killed_service_cgroup() -> Optional[str]:
     """Cgroup path when a unit stop will kill this process, else None."""
     if not os.environ.get("INVOCATION_ID"):
@@ -34,7 +53,7 @@ def caller_killed_service_cgroup() -> Optional[str]:
 
 
 def _systemctl_show(unit: str, prop: str) -> str:
-    for prefix in ([], ["--user"]):
+    for prefix in _SCOPES:
         try:
             result = subprocess.run(
                 ["systemctl", *prefix, "show", unit, "-p", prop, "--value"],
@@ -92,7 +111,7 @@ def launch_detached_service(
     )
     argv = [sys.executable, str(runner), str(code_path), *argv]
     cmd = [
-        "systemd-run", "--collect", f"--unit={unit_name}", "--property=Type=exec",
+        "--collect", f"--unit={unit_name}", "--property=Type=exec",
         f"--working-directory={cwd}",
         f"--property=StandardOutput=file:{stdout_path}",
         f"--property=StandardError=file:{stderr_path}",
@@ -104,8 +123,21 @@ def launch_detached_service(
         cmd.append(f"--setenv={key}={value}")
     cmd.append("--")
     cmd.extend(str(part) for part in argv)
-    subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                   timeout=30)
+    last_error: object = None
+    for prefix in list(_SCOPES):
+        try:
+            subprocess.run(["systemd-run", *prefix, *cmd], check=True, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=30)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            last_error = exc
+            continue
+        if prefix != _SCOPES[0]:
+            _SCOPES.remove(prefix)
+            _SCOPES.insert(0, prefix)
+        break
+    else:
+        raise RuntimeError(f"systemd-run could not start {unit_name}: {last_error}")
     deadline = time.time() + 15
     pid = None
     while time.time() < deadline:
@@ -150,7 +182,8 @@ def wait_service(unit: str, timeout_seconds: int = 0) -> int:
         if state == "" and (time.monotonic() - started) > 2:
             return 0
         if timeout_seconds and (time.monotonic() - started) > timeout_seconds:
-            subprocess.run(["systemctl", "stop", unit], check=False, timeout=20, stdin=subprocess.DEVNULL)
+            subprocess.run(["systemctl", *_SCOPES[0], "stop", unit], check=False, timeout=20,
+                           stdin=subprocess.DEVNULL)
             raise subprocess.TimeoutExpired(unit, timeout_seconds)
         time.sleep(0.5)
 

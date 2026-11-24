@@ -195,3 +195,49 @@ async def test_failed_agent_swap_rolls_back_and_keeps_override_out(monkeypatch, 
     assert isinstance(reply, str) and "staying on" in reply
     assert session_key not in runner._session_model_overrides
     assert not runner._pending_model_notes
+
+
+def test_pipeline_consults_idle_command_table():
+    """The inbound chain must ask the idle table, or /model (no explicit branch) becomes a
+    chat prompt for the LLM again."""
+    import inspect
+
+    src = inspect.getsource(GatewayRunner._handle_message_pipeline)
+    assert "_gateway_idle_command_handlers()" in src
+
+
+@pytest.mark.asyncio
+async def test_no_arg_model_refreshes_cache_and_shows_refresh_notice(monkeypatch, tmp_path):
+    _patch_config(monkeypatch, tmp_path)
+    cleared = []
+    monkeypatch.setattr(
+        "hermes_cli.models.clear_provider_models_cache", lambda *a, **k: cleared.append(True))
+
+    class _Adapter:
+        def __init__(self):
+            self.sent, self.deleted = [], []
+
+        async def send(self, chat_id, content, metadata=None, **kwargs):
+            from gateway.platforms.base import SendResult
+            self.sent.append(content)
+            return SendResult(success=True, message_id="notice-1")
+
+        async def send_model_picker(self, **kwargs):
+            from gateway.platforms.base import SendResult
+            return SendResult(success=True, message_id="picker-1")
+
+        async def delete_message(self, chat_id, message_id):
+            self.deleted.append(message_id)
+            return True
+
+    adapter = _Adapter()
+    runner = _make_runner()
+    runner._delivery_adapter_for = lambda source: adapter
+
+    reply = await runner._handle_model_command(_make_event("/model"))
+
+    assert reply is None  # picker owns the response
+    assert cleared == [True]  # cache busted before the picker listed
+    assert adapter.sent and "refreshing models" in adapter.sent[0]
+    assert "395769211244511234" in adapter.sent[0]
+    assert adapter.deleted == ["notice-1"]  # notice cleaned up behind the picker

@@ -1,4 +1,4 @@
-"""Speed Channels plugin — Discord voice-channel download walls."""
+"""Speed Channels plugin — Discord voice-channel vitals walls."""
 
 from __future__ import annotations
 

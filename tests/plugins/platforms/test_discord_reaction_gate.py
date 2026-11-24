@@ -75,27 +75,28 @@ def _conversation_state(content: str = "thanks, that fixed it!") -> dict:
 
 
 class TestJevLitellmContract:
-    """The Jev callers post to the litellm proxy directly (2026-11 cutover from OpenRouter).
+    """The Jev callers post to OpenCode's native System One API (2026-11 cutover
+    from the retired litellm proxy).
 
-    The fixed endpoint is the litellm proxy's ``POST /jev/decisions`` and the credential is
-    a litellm virtual key (``LITELLM_API_KEY``). Model ids are proxy-native: the OpenRouter
-    slug ``typesafe/jev-1.13`` is answered with 400 Unknown model.
+    The fixed endpoint is ``POST /inference/systemone/v1/systemone`` and the
+    credential is ``LITELLM_API_KEY`` or, falling back, ``OPENCODE_GO_API_KEY``.
+    Model ids are OpenCode-native.
     """
 
-    def test_fixed_decisions_url_is_the_litellm_proxy(self):
+    def test_fixed_decisions_url_is_the_opencode_systemone_api(self):
         import hermes_cli.goal_intent as goal_intent
 
-        assert JEV_DECISIONS_URL == "http://192.168.30.21:4000/jev/decisions"
+        assert JEV_DECISIONS_URL == "https://opencode.ai/inference/systemone/v1/systemone"
         # goal_intent duplicates the fixed URL on purpose (hermes_cli never imports a
         # platform plugin module); the two spellings must never drift apart.
         assert goal_intent.JEV_DECISIONS_URL == JEV_DECISIONS_URL
 
-    def test_default_judge_model_is_proxy_native(self):
+    def test_default_judge_model_is_opencode_native(self):
         from gateway.config import ResponseGateConfig
         import hermes_cli.goal_intent as goal_intent
 
-        assert ResponseGateConfig().model == "jev-1.14.0"
-        assert ReactionGateConfig().model == "jev-1.14.0"
+        assert ResponseGateConfig().model == "jev-1.13-free"
+        assert ReactionGateConfig().model == "jev-1.13-free"
         assert goal_intent.JEV_MODEL == ResponseGateConfig().model
 
     def test_gate_credential_env_is_litellm_api_key(self, monkeypatch):
@@ -401,7 +402,7 @@ class TestReactionGateConfigFromDict:
         assert config.include_threads is True
         assert config.emojis == DEFAULT_REACTION_EMOJIS
         assert config.criteria == {}
-        assert config.model == "jev-1.14.0"
+        assert config.model == "jev-1.13-free"
         assert config.timeout_seconds == 3.0
         assert config.context_messages == 10
         assert config.context_chars == 8000

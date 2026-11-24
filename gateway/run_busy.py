@@ -1173,7 +1173,7 @@ class GatewayBusySessionMixin:
     _PLAIN_COMMANDS = (
         "status", "context", "restart", "pause", "agents", "bg", "btw",
         "subgoal", "verbose", "help",
-        "commands", "profile", "update", "version",
+        "commands", "profile", "update", "version", "goalstop", "goalstart",
     )
     # Dispatched only on the idle path (busy dispatch has its own allowlist).
     _IDLE_COMMANDS = (
@@ -1253,6 +1253,18 @@ class GatewayBusySessionMixin:
             f"⏳ Agent is running — `/{name}` can't run "
             f"mid-turn. Wait for the current response or `/stop` first."
         )
+
+    async def _handle_goalstop_command(self, event: MessageEvent):
+        from hermes_cli.goals import set_goals_disabled
+        if set_goals_disabled(True):
+            return "🛑 Goals off — no new goals, no judge continuations. `/goalstart` re-enables."
+        return "Goals were already off. `/goalstart` re-enables."
+
+    async def _handle_goalstart_command(self, event: MessageEvent):
+        from hermes_cli.goals import set_goals_disabled
+        if set_goals_disabled(False):
+            return "▶️ Goals on — automatic goals and continuations are live again."
+        return "Goals were already on."
 
     async def _handle_pause_command(self, event: MessageEvent):
         """`/pause [reason]` engages the global emergency stop; `/pause off` lifts it (the estop gate

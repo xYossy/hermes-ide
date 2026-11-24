@@ -463,7 +463,7 @@ class ResponseGateConfig:
     #: Total character budget for the buffered context block.
     context_chars: int = 8000
     #: Judge model; fixed default, no fallback chain.
-    model: str = "jev-1.14.0"
+    model: str = "jev-1.13-free"
     #: Optional judge-facing identity. ``None`` follows the connected user on each Discord READY.
     bot_name: Optional[str] = None
     #: Optional loopback-only override for the Decisions endpoint, so judge calls can
@@ -566,7 +566,7 @@ class ResponseGateConfig:
         context_chars = _response_gate_int(
             data, "context_chars", 8000, 1, cls.MAX_CONTEXT_CHARS, "response_gate.context_chars",
         )
-        model = str(data.get("model", "jev-1.14.0")).strip()
+        model = str(data.get("model", "jev-1.13-free")).strip()
         if not model:
             raise ValueError("response_gate: model must be a non-empty model slug")
         bot_name = data.get("bot_name")
@@ -820,7 +820,7 @@ class ReactionGateConfig:
     #: Total character budget for the buffered context block.
     context_chars: int = 8000
     #: Judge model; fixed default, no fallback chain.
-    model: str = "jev-1.14.0"
+    model: str = "jev-1.13-free"
     #: Optional loopback-only override for the Decisions endpoint (see ResponseGateConfig).
     decisions_url: Optional[str] = None
     #: The decision rule: one Boolean expression over ``abstain``/``none``/``other``/
@@ -926,7 +926,7 @@ class ReactionGateConfig:
         context_chars = _response_gate_int(
             data, "context_chars", 8000, 1, cls.MAX_CONTEXT_CHARS, "reaction_gate.context_chars",
         )
-        model = str(data.get("model", "jev-1.14.0")).strip()
+        model = str(data.get("model", "jev-1.13-free")).strip()
         if not model:
             raise ValueError("reaction_gate: model must be a non-empty model slug")
         decisions_url = data.get("decisions_url")

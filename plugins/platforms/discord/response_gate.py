@@ -32,10 +32,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
-#: Fixed Jev endpoint: the litellm proxy fronting TypeSafe's Jev Decisions,
-#: authenticated with a litellm virtual key; optional loopback
+#: Fixed Jev endpoint: OpenCode's native System One API, authenticated with
+#: LITELLM_API_KEY or OPENCODE_GO_API_KEY; optional loopback
 #: ``response_gate.decisions_url`` override only.
-JEV_DECISIONS_URL = "http://192.168.30.21:4000/jev/decisions"
+JEV_DECISIONS_URL = "https://opencode.ai/inference/systemone/v1/systemone"
 
 #: Fixed question keys; the gate asks exactly these four noul questions per consultation,
 #: in one bounded Decisions request.

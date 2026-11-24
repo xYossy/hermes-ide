@@ -6,8 +6,12 @@ not what should be persisted in conversation history.
 
 from __future__ import annotations
 
+import logging
+import re
 import unicodedata
 from typing import Any
+
+logger = logging.getLogger("gateway.response_filters")
 
 # Exact whole-response markers meaning "the agent intentionally chose not to
 # reply". Keep small and explicit; arbitrary empty output remains an
@@ -35,6 +39,26 @@ MACHINERY_DISPLAY_KINDS = frozenset({INTERNAL_NOTIFICATION_DISPLAY_KIND})
 
 # Longer than any marker could plausibly be, even with stray punctuation.
 _MARKER_LENGTH_CAP = 64
+
+# Model special-token framing a model sometimes emits as plain text instead of a
+# structured tool call. It is never content; the user must not see it.
+# BAR is U+FF5C FULLWIDTH VERTICAL LINE, the bar those tokens are wrapped in.
+_CONTROL_TOKEN_BAR = "｜"
+_MODEL_CONTROL_TOKEN_RE = re.compile(
+    rf"</?{_CONTROL_TOKEN_BAR}[^<>\n]{{0,120}}>"             # fullwidth-bar framing
+    rf"|</?\|[A-Za-z_][\w.\- ]{{0,40}}\|?>"                  # ascii-bar framing, e.g. <|im_end|>
+)
+
+
+def strip_model_control_tokens(text: str) -> str:
+    """Drop residual model special-token markup from user-visible text."""
+    if not isinstance(text, str) or "<" not in text:
+        return text
+    cleaned, hits = _MODEL_CONTROL_TOKEN_RE.subn("", text)
+    if not hits:
+        return text
+    logger.warning("stripped %d model special-token fragment(s) from outbound text", hits)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def _canonical_silence_candidate(text: str) -> str:

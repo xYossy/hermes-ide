@@ -1,13 +1,18 @@
-"""Core speed_channels logic — downloader polling and Discord renames.
+"""Core speed_channels logic — live vitals walls and Discord renames.
 
-Three Discord voice channels act as live download walls. Every tick (intended
-to run every minute via cron) renames them with the downloader's current
-throughput and queue depth, and refreshes the Speeds category label:
+Four Discord voice channels act as a self-updating vitals display. Every tick
+(intended to run every few minutes via cron) renames them with a live reading,
+and refreshes the Speeds category label:
 
-* ``qBittorrent: 2.4 MB/s ↓ • 5 in queue``
-* ``SABnzbd: 1.1 MB/s ↓ • 12 in queue``
-* ``slskd: 340 KB/s ↓ • 96 KB/s ↑ • 3 in queue``
+* ``Power: 63W · 2/2 online``        — Shelly PlusPlugS draw over the LAN
+* ``WAN: ↓ 24.4 ↑ 3.1 Mbps``        — this host's uplink traffic, kernel counters
+* (``WAN: ↓ 75 ↑ 11 kbit/s`` below 1 Mbit/s, ``WAN: idle`` at zero)
+* ``Spend: 9.7M tok · 1695 calls``   — today's tokens from state.db
+* ``Agents: 0 running · 25 done``    — async delegations from state.db
 * ``Speeds • 33ms • 21/8 6:29pm • Next: 6:34pm``
+
+Every reader degrades only its own channel: an unplugged Shelly, an unreadable
+database or an unreadable interface never stops the other three from renaming.
 
 Channel renames are rate-limited by Discord (2 per 10 min per channel), so a
 channel is only PATCHed when its name actually changes, and the category label
@@ -19,9 +24,10 @@ ticks; between polls it is held in ``pending_latency_ms`` so every category
 PATCH carries the scheduled timestamp update and latency never steals the
 2-per-10-min rename budget.
 
-Downloader API shapes, env-file names and label formats follow the reference
-script the live deployment ran; the peer's absolute secret paths are resolved
-relative to ``HERMES_HOME`` here instead.
+Label formats follow the reference script the live deployment ran; the readers
+behind them are local now, so there are no env-file
+secrets to resolve. ``state.db`` is Hermes's own session store, opened
+read-only so a tick can never write to it.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -38,23 +45,26 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 # Transport contract. Unlike quota_channels' (status, body) pair this also
-# returns response headers, because qBittorrent's session cookie arrives on the
-# login response's Set-Cookie and has to be replayed on the two reads that
-# follow it.
+# returns response headers; the readers only use status and body, and the
+# headers stay so every call in this module shares one transport shape.
 HttpFn = Callable[
     [urllib.request.Request, float], Tuple[int, bytes, Dict[str, str]]
 ]
 NowFn = Callable[[], float]
-# Latency probe: one ICMP echo to Cloudflare DNS, milliseconds or None.
+# Latency probe: one ICMP echo to PING_HOST, milliseconds or None.
 PingFn = Callable[[], Optional[float]]
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 DISCORD_USER_AGENT = "DiscordBot (https://github.com/hermes-agent, 1.0)"
 
-DEFAULT_POLL_INTERVAL_SECONDS = 300
+DEFAULT_POLL_INTERVAL_SECONDS = 600
+# WAN rate comes from the uplink interface's own byte counters over a short
+# window: local, free, and no payload leaves the box.
+WAN_WINDOW_SECONDS = 3.0
+STATE_DB_FILENAME = "state.db"
 STATE_FILENAME = "speed_channels_state.json"
 
 # Hardcoded on purpose — a config knob for one host is more surface than the
@@ -64,10 +74,11 @@ PING_HOST = "1.1.1.1"
 # so a jittering RTT cannot eat the category's 2-renames-per-10-min budget.
 LATENCY_HYSTERESIS_MS = 5.0
 
-DOWNLOADERS: Tuple[Tuple[str, str], ...] = (
-    ("qbittorrent", "qBittorrent"),
-    ("sabnzbd", "SABnzbd"),
-    ("slskd", "slskd"),
+CHANNELS: Tuple[Tuple[str, str], ...] = (
+    ("power", "Power"),
+    ("wan", "WAN"),
+    ("spend", "Spend"),
+    ("agents", "Agents"),
 )
 
 
@@ -175,7 +186,7 @@ def validate_speed_config(section: Mapping[str, Any]) -> dict:
         raise SpeedChannelsError("speed_channels.channel_ids must be a mapping")
 
     resolved: Dict[str, str] = {}
-    for key, _label in DOWNLOADERS:
+    for key, _label in CHANNELS:
         channel_id = channel_ids.get(key)
         if not channel_id:
             raise SpeedChannelsError(
@@ -183,12 +194,21 @@ def validate_speed_config(section: Mapping[str, Any]) -> dict:
             )
         resolved[key] = str(channel_id)
 
+    shelly_hosts = section.get("shelly_hosts") or []
+    if not isinstance(shelly_hosts, (list, tuple)):
+        raise SpeedChannelsError("speed_channels.shelly_hosts must be a list")
+
     return {
         "guild_id": str(guild_id),
         "category_id": str(category_id),
         "channel_ids": resolved,
         "poll_interval_seconds": int(
             section.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)
+        ),
+        "wan_interface": str(section.get("wan_interface") or "").strip(),
+        "shelly_hosts": [str(h).strip() for h in shelly_hosts if str(h).strip()],
+        "state_db": os.path.expanduser(
+            str(section.get("state_db") or (_hermes_home() / STATE_DB_FILENAME))
         ),
     }
 
@@ -261,18 +281,6 @@ def _json_body(status: int, body: bytes, what: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def fmt_speed(bytes_per_s: float) -> str:
-    """Compact human speed; the narrow no-break space keeps units unwrapped."""
-    b = max(0.0, float(bytes_per_s))
-    if b < 1024:
-        return f"{int(b)} B/s"
-    if b < 1024 ** 2:
-        return f"{b / 1024:.0f} KB/s"
-    if b < 1024 ** 3:
-        return f"{b / 1024 ** 2:.1f} MB/s"
-    return f"{b / 1024 ** 3:.2f} GB/s"
-
-
 def _fmt_clock(dt: datetime) -> str:
     hour = dt.hour % 12 or 12
     suffix = "am" if dt.hour < 12 else "pm"
@@ -295,26 +303,6 @@ def fmt_ts(epoch: float) -> str:
 
 def fmt_time(epoch: float) -> str:
     return _fmt_clock(datetime.fromtimestamp(epoch))
-
-
-def channel_names(
-    qbit_dl: float,
-    qbit_queue: int,
-    sab_dl: float,
-    sab_queue: int,
-    slsk_dl: float,
-    slsk_up: float,
-    slsk_queue: int,
-) -> Dict[str, str]:
-    """The three voice-channel names for one poll."""
-    return {
-        "qbittorrent": f"qBittorrent: {fmt_speed(qbit_dl)} ↓ • {qbit_queue} in queue",
-        "sabnzbd": f"SABnzbd: {fmt_speed(sab_dl)} ↓ • {sab_queue} in queue",
-        "slskd": (
-            f"slskd: {fmt_speed(slsk_dl)} ↓ • {fmt_speed(slsk_up)} ↑"
-            f" • {slsk_queue} in queue"
-        ),
-    }
 
 
 def category_name(
@@ -340,7 +328,7 @@ def category_name(
 
 
 # ---------------------------------------------------------------------------
-# Latency (best-effort ICMP, independent of the download walls)
+# Latency (best-effort ICMP, independent of the readers below)
 # ---------------------------------------------------------------------------
 
 # iputils: ``time=33.338 ms`` / ``time=33.3ms`` / ``time<1ms`` / ``time<1 ms``;
@@ -413,114 +401,154 @@ def displayed_latency(
 
 
 # ---------------------------------------------------------------------------
-# Downloader polls
+# Vitals readers
+#
+# Each reader returns its channel's full name and none of them raises: a dead
+# plug, a busy database or an unreadable interface degrades one channel and leaves
+# the other three renaming.
 # ---------------------------------------------------------------------------
 
 
-def qbit_speeds(http_fn: HttpFn = default_http) -> Tuple[float, float, int]:
-    """qBittorrent: login → transfer/info + torrents/info?filter=downloading."""
-    env = _secret_env("qbittorrent.env")
-    base = _read_env_key(env, "QBIT_BASE_URL").rstrip("/")
-    user = _read_env_key(env, "QBIT_USER")
-    password = _read_env_key(env, "QBIT_PASS")
-
-    # Field names only — values come from the env file, never this diff.
-    form = urllib.parse.urlencode({"username": user, "pass": password}).encode()
-    login_req = urllib.request.Request(
-        base + "/api/v2/auth/login",
-        data=form,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    status, body, headers = http_fn(login_req, 20.0)
-    if status not in (200, 204):
-        raise SpeedChannelsError(f"qbit login returned {status}")
-    if body and body.strip() not in (b"Ok.", b""):
-        raise SpeedChannelsError("qbit login rejected (bad credentials)")
-
-    # The session id rides on Set-Cookie; replay it on the two reads.
-    cookie = "; ".join(v for k, v in headers.items() if k == "set-cookie")
-    auth_headers = {"Cookie": cookie} if cookie else {}
-
-    info_req = urllib.request.Request(
-        base + "/api/v2/transfer/info", headers=auth_headers
-    )
-    status, body, _ = http_fn(info_req, 20.0)
-    info = _json_body(status, body, "qbit transfer/info")
-
-    torrents_req = urllib.request.Request(
-        base + "/api/v2/torrents/info?filter=downloading", headers=auth_headers
-    )
-    status, body, _ = http_fn(torrents_req, 20.0)
-    downloading = _json_body(status, body, "qbit torrents/info")
-    if not isinstance(downloading, list):
-        raise SpeedChannelsError("qbit torrents/info not a list")
-
-    return (
-        float(info.get("dl_info_speed") or 0),
-        float(info.get("up_info_speed") or 0),
-        len(downloading),
-    )
+def fmt_tokens(count: float) -> str:
+    n = max(0.0, float(count))
+    if n < 1000:
+        return f"{int(n)}"
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k"
+    return f"{n / 1_000_000:.1f}M"
 
 
-def sab_speed(http_fn: HttpFn = default_http) -> Tuple[float, int]:
-    """SABnzbd: GET /api?mode=queue&output=json — kbpersec, noofslots."""
-    env = _secret_env("sabnzbd.env")
-    base = _read_env_key(env, "SABNZBD_URL").rstrip("/")
-    apikey = _read_env_key(env, "SABNZBD_API_KEY")
-
-    url = f"{base}/api?mode=queue&output=json&apikey={urllib.parse.quote(apikey)}"
-    status, body, _ = http_fn(urllib.request.Request(url), 20.0)
-    payload = _json_body(status, body, "sab queue endpoint")
-    queue = payload.get("queue") if isinstance(payload, dict) else None
-    if queue is None:
-        raise SpeedChannelsError("no queue object in sab payload")
-    try:
-        speed = float(queue.get("kbpersec") or 0) * 1024
-        slots = int(queue.get("noofslots") or 0)
-    except (TypeError, ValueError):
-        raise SpeedChannelsError("unparsable sab queue fields") from None
-    return speed, slots
-
-
-def _slsk_totals(payload: Any) -> Tuple[float, int]:
-    speed = 0.0
-    active = 0
-    if not isinstance(payload, list):
-        return speed, active
-    for user in payload:
-        if not isinstance(user, dict):
+def shelly_watts(
+    hosts: Sequence[str], http_fn: HttpFn = default_http
+) -> Tuple[float, int]:
+    """Summed live draw of every plug that answered, and how many answered."""
+    total, online = 0.0, 0
+    for host in hosts:
+        try:
+            req = urllib.request.Request(f"http://{host}/rpc/Shelly.GetStatus")
+            status, body, _ = http_fn(req, 3.0)
+            switch = _json_body(status, body, f"shelly {host}").get("switch:0") or {}
+            total += float(switch.get("apower") or 0.0)
+            online += 1
+        except (SpeedChannelsError, TypeError, ValueError):
             continue
-        for directory in user.get("directories", []) or []:
-            if not isinstance(directory, dict):
-                continue
-            for file_entry in directory.get("files", []) or []:
-                if not isinstance(file_entry, dict):
-                    continue
-                state = str(file_entry.get("state") or "")
-                if "Succeeded" in state or "Cancelled" in state:
-                    continue
-                active += 1
-                speed += float(file_entry.get("averageSpeed") or 0)
-    return speed, active
+    return total, online
 
 
-def slskd_speeds(http_fn: HttpFn = default_http) -> Tuple[float, float, int]:
-    """slskd: sum per-file averageSpeed over downloads/uploads via X-API-Key."""
-    env = _secret_env("slskd.env")
-    base = _read_env_key(env, "SLSKD_URL").rstrip("/")
-    apikey = _read_env_key(env, "SLSKD_API_KEY")
-    headers = {"X-API-Key": apikey}
+def power_name(hosts: Sequence[str], http_fn: HttpFn = default_http) -> str:
+    if not hosts:
+        return "Power: no plugs configured"
+    watts, online = shelly_watts(hosts, http_fn)
+    if online == 0:
+        return "Power: unreachable"
+    return f"Power: {watts:.0f}W · {online}/{len(hosts)} online"
 
-    def fetch(path: str) -> Any:
-        status, body, _ = http_fn(
-            urllib.request.Request(base + path, headers=headers), 20.0
-        )
-        return _json_body(status, body, f"slskd {path}")
 
-    dl_speed, dl_active = _slsk_totals(fetch("/api/v0/transfers/downloads"))
-    up_speed, _ = _slsk_totals(fetch("/api/v0/transfers/uploads"))
-    return dl_speed, up_speed, dl_active
+def default_iface() -> str:
+    """The interface carrying the default route, from /proc/net/route."""
+    try:
+        rows = Path("/proc/net/route").read_text().splitlines()[1:]
+    except OSError:
+        return ""
+    for row in rows:
+        fields = row.split()
+        if len(fields) >= 2 and fields[1] == "00000000":
+            return fields[0]
+    return ""
+
+
+def iface_counters(iface: str) -> Tuple[int, int]:
+    """Bytes received and sent by one interface, straight from the kernel."""
+    base = Path("/sys/class/net") / iface / "statistics"
+    return int((base / "rx_bytes").read_text()), int(
+        (base / "tx_bytes").read_text()
+    )
+
+
+def wan_rates(
+    iface: str,
+    *,
+    window: float = WAN_WINDOW_SECONDS,
+    counters_fn: Callable[[str], Tuple[int, int]] = iface_counters,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Tuple[float, float]:
+    """Down/up megabits per second over ``window`` seconds of this host's uplink.
+
+    The nominal window is the divisor: a sleep that overshoots by a few
+    milliseconds is a rounding error on a 3 s sample, and it keeps the
+    arithmetic testable without a fake clock.
+    """
+    rx0, tx0 = counters_fn(iface)
+    sleep_fn(window)
+    rx1, tx1 = counters_fn(iface)
+    span = max(window, 0.001)
+    return (rx1 - rx0) * 8 / span / 1e6, (tx1 - tx0) * 8 / span / 1e6
+
+
+def wan_name(
+    iface: str, rates_fn: Optional[Callable[[str], Tuple[float, float]]] = None
+) -> str:
+    read = rates_fn or wan_rates
+    if not iface:
+        return "WAN: no uplink found"
+    try:
+        down, up = read(iface)
+    except (OSError, ValueError):
+        return "WAN: unreachable"
+    if down < 0.01 and up < 0.01:
+        return "WAN: idle"
+    if max(down, up) < 1.0:
+        # One decimal in Mbps prints an idle-but-moving link as "0.0".
+        return f"WAN: ↓ {down * 1000:.0f} ↑ {up * 1000:.0f} kbit/s"
+    return f"WAN: ↓ {down:.1f} ↑ {up:.1f} Mbps"
+
+
+def _db_rows(db_path: str, sql: str, params: tuple = ()) -> List[tuple]:
+    """Read-only query against Hermes's session store."""
+    uri = f"file:{urllib.parse.quote(os.path.expanduser(db_path))}?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=3.0)
+    try:
+        return con.execute(sql, params).fetchall()
+    finally:
+        con.close()
+
+
+def _day_start(now_fn: NowFn = time.time) -> float:
+    return datetime.fromtimestamp(now_fn()).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
+
+
+def spend_name(db_path: str, now_fn: NowFn = time.time) -> str:
+    try:
+        calls, tokens = _db_rows(
+            db_path,
+            "SELECT COALESCE(SUM(api_call_count),0),"
+            " COALESCE(SUM(input_tokens+output_tokens),0)"
+            " FROM session_model_usage WHERE last_seen >= ?",
+            (_day_start(now_fn),),
+        )[0]
+    except Exception:
+        return "Spend: db unreadable"
+    return f"Spend: {fmt_tokens(tokens)} tok · {int(calls)} calls"
+
+
+def agents_name(db_path: str, now_fn: NowFn = time.time) -> str:
+    try:
+        running = _db_rows(
+            db_path,
+            "SELECT COUNT(*) FROM async_delegations"
+            " WHERE state IN ('running','finalizing')",
+        )[0][0]
+        done = _db_rows(
+            db_path,
+            "SELECT COUNT(*) FROM async_delegations"
+            " WHERE state='completed' AND completed_at >= ?",
+            (_day_start(now_fn),),
+        )[0][0]
+    except Exception:
+        return "Agents: db unreadable"
+    return f"Agents: {int(running)} running · {int(done)} done"
 
 
 # ---------------------------------------------------------------------------
@@ -601,13 +629,11 @@ def run_tick(
     http_fn: HttpFn = default_http,
     ping_fn: PingFn = default_ping,
 ) -> dict:
-    """One tick: poll the downloaders if due, then always refresh the label.
+    """One tick: read the vitals if due, then always refresh the label.
 
-    All three downloaders must succeed for a poll to count — a failing one
-    raises before ``save_state``, so the next tick retries instead of silently
-    freezing a wall at a stale speed. The 1.1.1.1 ping runs after that
-    all-or-nothing block on every tick (polled or not) and is strictly
-    best-effort: it can never raise, block a poll, or advance
+    The four readers never raise; each degrades only its own channel. The
+    1.1.1.1 ping runs on every tick (polled or not) and is
+    strictly best-effort: it can never raise, block a poll, or advance
     ``last_poll_success`` — its only effects are the label's latency slot and
     ``last_latency_ms`` / ``pending_latency_ms`` in the state file.
 
@@ -628,15 +654,16 @@ def run_tick(
     did_poll = False
     names: Dict[str, str] = {}
     if poll_due(state, interval, force=force, now_fn=now_fn):
-        qbit_dl, _qbit_up, qbit_queue = qbit_speeds(http_fn)
-        sab_dl, sab_queue = sab_speed(http_fn)
-        slsk_dl, slsk_up, slsk_queue = slskd_speeds(http_fn)
-        names = channel_names(
-            qbit_dl, qbit_queue, sab_dl, sab_queue, slsk_dl, slsk_up, slsk_queue
-        )
+        now = float(now_fn())
+        names = {
+            "power": power_name(config["shelly_hosts"], http_fn),
+            "wan": wan_name(config["wan_interface"] or default_iface()),
+            "spend": spend_name(config["state_db"], now_fn=now_fn),
+            "agents": agents_name(config["state_db"], now_fn=now_fn),
+        }
         for key, name in names.items():
             rename_channel(config["channel_ids"][key], name, headers, http_fn=http_fn)
-        last = float(now_fn())
+        last = now
         did_poll = True
 
     # Best-effort latency: a raise here would be a helper bug (default_ping

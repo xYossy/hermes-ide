@@ -317,8 +317,31 @@ class GatewayModelCommandsMixin:
                 with _profile_runtime_scope(profile_home):
                     return await _picker_switch(model_id, provider_slug)
 
-            if await self._send_model_picker(event, ctx.source, adapter, ctx.session_key, listing_kwargs, _on_model_selected):
-                return None  # Picker sent — adapter handles the response
+            # Every /model open lists live models: drop the cache and show a notice while the
+            # fetch runs, then remove the notice once the picker (or its fallback) is out.
+            # shortcut: a cross-server custom emoji renders only for users in the emoji's
+            # server, otherwise it shows as plain ":discordtyping:" text, never as an error.
+            _notice_id = ""
+            if getattr(ctx.source.platform, "value", "") == "discord":
+                try:
+                    _notice = await adapter.send(
+                        str(ctx.source.chat_id),
+                        "<a:discordtyping:395769211244511234> refreshing models",
+                        metadata=self._thread_metadata_for_source(ctx.source),
+                    )
+                    _notice_id = (_notice.message_id or "") if _notice.success else ""
+                except Exception:
+                    logger.debug("model refresh notice send failed", exc_info=True)
+            try:
+                with contextlib.suppress(Exception):
+                    from hermes_cli.models import clear_provider_models_cache
+                    clear_provider_models_cache()
+                if await self._send_model_picker(event, ctx.source, adapter, ctx.session_key, listing_kwargs, _on_model_selected):
+                    return None  # Picker sent — adapter handles the response
+            finally:
+                if _notice_id:
+                    with contextlib.suppress(Exception):
+                        await adapter.delete_message(str(ctx.source.chat_id), _notice_id)
 
         try:  # off-loop: listing can hit a stale-cache HTTP fetch
             providers = await asyncio.to_thread(list_authenticated_providers, max_models=5, **listing_kwargs)

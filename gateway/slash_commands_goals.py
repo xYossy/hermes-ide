@@ -35,6 +35,8 @@ class GatewayGoalCommandsMixin:
     """Autonomy-loop gateway commands: /goal, /subgoal, /loop, /refine, /review."""
 
     async def _handle_goal_command(self, event: MessageEvent) -> str:
+        if self._goals_disabled_for_source(event.source):
+            return "Goals are disabled in this channel."
         from hermes_cli.goal_command import dispatch_goal_command
         from hermes_cli.goals import last_user_message_from_db
 

@@ -14,9 +14,9 @@ import (
 
 const (
 	// JEVDecisionsURL is the fixed Decisions endpoint used by goal intent.
-	JEVDecisionsURL = "http://192.168.30.21:4000/jev/decisions"
+	JEVDecisionsURL = "https://opencode.ai/inference/systemone/v1/systemone"
 	// JEVModel is the fixed Jev model used by goal intent.
-	JEVModel = "jev-1.14.0"
+	JEVModel = "jev-1.13-free"
 	// RetrospectiveConfidenceMin is the existing auto-goal action floor.
 	RetrospectiveConfidenceMin = 0.6
 

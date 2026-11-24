@@ -36,7 +36,7 @@ def main(argv: list | None = None) -> int:
     parser.add_argument(
         "--force-poll",
         action="store_true",
-        help="Bypass the poll-interval gate and poll all three downloaders.",
+        help="Bypass the poll-interval gates and re-read every source.",
     )
     parser.add_argument(
         "--debug",

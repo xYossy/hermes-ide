@@ -45,6 +45,38 @@ class GatewayGoalsMixin:
         except Exception:
             return 20
 
+    def _goals_disabled_for_source(self, source: Any) -> bool:
+        """``goals.disabled_channels``: chats where the goal feature is off entirely.
+
+        Matches the chat id, or the parent channel id for a thread, so muting a
+        channel mutes its threads too. Config errors fail open (goals stay on).
+        """
+        try:
+            from pathlib import Path
+
+            from gateway.run import _load_gateway_config
+            from hermes_cli.config import cfg_get
+
+            chat_ids = {
+                str(v).strip()
+                for v in (
+                    getattr(source, "chat_id", None),
+                    getattr(source, "parent_chat_id", None),
+                )
+                if v
+            }
+            if not chat_ids:
+                return False
+            home = Path(self._resolve_profile_home_for_source(source))
+            raw = cfg_get(
+                _load_gateway_config(home / "config.yaml"), "goals", "disabled_channels"
+            )
+            if isinstance(raw, str):
+                raw = raw.replace(",", " ").split()
+            return bool(chat_ids & {str(v).strip() for v in (raw or [])})
+        except Exception:
+            return False
+
     async def _warm_goals_session_db(self, label: str) -> None:
         """Warm the goals SessionDB cache off-loop (best-effort): a cold cache runs the state.db
         init on the loop thread and freezes the loop. The executor hop keeps the profile home
@@ -260,6 +292,8 @@ class GatewayGoalsMixin:
 
         sid = getattr(session_entry, "session_id", None) or ""
         if not sid:
+            return
+        if self._goals_disabled_for_source(source):
             return
 
         max_turns = self._goal_max_turns_from_config()

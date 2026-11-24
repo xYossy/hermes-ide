@@ -20,19 +20,19 @@ from plugins.speed_channels.core import (
 
 def test_matching_name_issues_no_patch(hermes, transport):
     headers = discord_headers()
-    transport.channels["cq"]["name"] = "qBittorrent: 0 B/s ↓ • 0 in queue"
+    transport.channels["cp"]["name"] = "Power: 63W · 2/3 online"
 
-    assert rename_channel("cq", "qBittorrent: 0 B/s ↓ • 0 in queue", headers, http_fn=transport) == "unchanged"
+    assert rename_channel("cp", "Power: 63W · 2/3 online", headers, http_fn=transport) == "unchanged"
     assert transport.patch_calls == 0
 
 
 def test_changed_name_is_patched_once(hermes, transport):
     headers = discord_headers()
 
-    assert rename_channel("cq", "qBittorrent: 2.5 MB/s ↓ • 5 in queue", headers, http_fn=transport) == "renamed"
-    assert transport.patched == [("cq", "qBittorrent: 2.5 MB/s ↓ • 5 in queue")]
+    assert rename_channel("cp", "Power: 63W · 2/3 online", headers, http_fn=transport) == "renamed"
+    assert transport.patched == [("cp", "Power: 63W · 2/3 online")]
     # Second call with the now-current name converges without another PATCH.
-    assert rename_channel("cq", "qBittorrent: 2.5 MB/s ↓ • 5 in queue", headers, http_fn=transport) == "unchanged"
+    assert rename_channel("cp", "Power: 63W · 2/3 online", headers, http_fn=transport) == "unchanged"
     assert transport.patch_calls == 1
 
 
@@ -51,7 +51,7 @@ def test_channel_429_still_raises(hermes, transport):
     transport.patch_status = 429
 
     with pytest.raises(SpeedChannelsError, match="429"):
-        rename_channel("cq", "qBittorrent: 2.5 MB/s ↓ • 5 in queue", discord_headers(), http_fn=transport)
+        rename_channel("cp", "Power: 63W · 2/3 online", discord_headers(), http_fn=transport)
 
 
 def test_authorization_header_shape(hermes):

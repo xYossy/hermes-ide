@@ -2464,6 +2464,12 @@ class GatewayInboundMixin:
         if canonical == "review":
             return await self._handle_review_command(event)
 
+        # Idle-only handlers that have no explicit branch above. The table is the single
+        # list of them; /model lived only there, so it fell through to the agent as text.
+        idle_handler = self._gateway_idle_command_handlers().get(canonical)
+        if idle_handler is not None:
+            return await idle_handler(event)
+
         # User-defined quick commands (bypass agent loop, no LLM call)
         if command:
             if isinstance(self.config, dict):

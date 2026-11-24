@@ -571,6 +571,35 @@ class TestAdd:
             }
         ]
 
+    def test_add_refuses_ambiguous_member_prefix(
+        self, discord_guests_module, token_env, discord_router, _isolate_env
+    ):
+        """REPRODUCTION (2026-11-22): two humans match the same member prefix.
+
+        ``_fetch_member`` (plugins/discord_guests/__init__.py:524) returns
+        ``matches[0]`` with no ambiguity check, so ``action=add member=ada``
+        silently creates the lounge for whichever member Discord's search
+        listed first, and reports ``matched_by: "name prefix"`` as if the
+        selection were unambiguous. Nothing tells the operator a second human
+        matched, so access is granted (or later revoked) for the wrong person.
+        """
+        ada_byron = {
+            "nick": None,
+            "roles": [],
+            "user": {"id": "555", "username": "ada2", "global_name": "Ada Byron"},
+        }
+        discord_router.search_results = [
+            discord_router.members_by_id["111"],
+            ada_byron,
+        ]
+
+        result = _call(discord_guests_module, {"action": "add", "member": "ada"})
+
+        # Two humans match: refuse and name both, never pick one silently.
+        assert result["success"] is False, result
+        assert "ambiguous" in result["error"].lower(), result
+        assert "111" in result["error"] and "555" in result["error"], result
+
     def test_add_by_user_id_slugs_plain_username(
         self, discord_guests_module, token_env, discord_router
     ):

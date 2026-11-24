@@ -7,7 +7,7 @@ and keeps in sync the whole structure:
   ``other`` (first: pinned to the top of the guild)
 * ``Lounges``         — text channels ``inbox``, ``outbox``
 * ``Models``          — voice channels ``Codex``, ``Kimi``, ``z.ai``, ``Grok``
-* ``Speeds``          — voice channels ``qBittorrent``, ``SABnzbd``, ``slskd``
+* ``Speeds``          — voice channels ``Power``, ``WAN``, ``Spend``, ``Agents``
 
 Creation alone is worthless, so reconcile also *wires* what it provisions:
 ``hermes_starts`` targets the shared inbox, the lifecycle-notification
@@ -199,15 +199,17 @@ TEMPLATE: Dict[str, ModuleSpec] = {
         key="speeds",
         category="Speeds",
         channels=(
-            ChannelSpec("qBittorrent", CHANNEL_TYPE_VOICE, "qbittorrent"),
-            ChannelSpec("SABnzbd", CHANNEL_TYPE_VOICE, "sabnzbd"),
-            ChannelSpec("slskd", CHANNEL_TYPE_VOICE, "slskd"),
+            ChannelSpec("Power", CHANNEL_TYPE_VOICE, "power", alias_prefixes=("qBittorrent",)),
+            ChannelSpec("WAN", CHANNEL_TYPE_VOICE, "wan", alias_prefixes=("SABnzbd",)),
+            ChannelSpec("Spend", CHANNEL_TYPE_VOICE, "spend", alias_prefixes=("slskd",)),
+            ChannelSpec("Agents", CHANNEL_TYPE_VOICE, "agents"),
         ),
         embed_title="⚡ Speeds",
         embed_description=(
-            "These voice channels are live download walls: each one is renamed "
-            "with the downloader's current throughput and how much is queued. "
-            "Nothing is ever posted here — the channel name is the display."
+            "These voice channels are live vitals walls: power draw from the "
+            "Shelly plugs, WAN throughput, today's token spend and how many "
+            "agents are running. Nothing is ever posted here — the channel "
+            "name is the display."
         ),
     ),
 }

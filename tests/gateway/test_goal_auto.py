@@ -228,6 +228,39 @@ async def test_low_confidence_or_chat_or_unknown_never_creates_goal(
     assert _goal_state() is None
 
 
+@pytest.mark.asyncio
+async def test_goalstop_blocks_auto_goal_creation(runner):
+    """/goalstop engages the global kill switch: while it is on, no task, approval
+    or chase decision creates or resumes a goal. Lifting it restores task starts."""
+    from hermes_cli.goals import GoalContract, goals_disabled, set_goals_disabled
+
+    with patch(
+        "hermes_cli.goals.draft_contract",
+        return_value=GoalContract(outcome="tdarr is back up and verified"),
+    ):
+        assert set_goals_disabled(True)
+        try:
+            assert goals_disabled()
+            for label in ("task", "approval", "chase"):
+                notice = await runner._apply_auto_goal_decision(
+                    _decision(label, "why is tdarr down"), _session_entry(), _source()
+                )
+                assert notice is None, label
+                assert _goal_state() is None, label
+        finally:
+            set_goals_disabled(False)
+
+        assert not goals_disabled()
+        notice = await runner._apply_auto_goal_decision(
+            _decision("task", "why is tdarr down"), _session_entry(), _source()
+        )
+        await _drain(runner)
+
+    assert notice == "🎯 Done when: tdarr is back up and verified"
+    state = _goal_state()
+    assert state is not None and state.status == "active"
+
+
 # ── approval / chase ──────────────────────────────────────────────────
 
 
@@ -410,6 +443,57 @@ async def test_stop_pauses_active_goal_and_makes_no_jev_call(runner):
     assert not getattr(runner, "_auto_goal_pending", {})
     state = GoalManager(session_id=entry.session_id).state
     assert state is not None and state.status == "paused"
+
+
+@pytest.mark.asyncio
+async def test_stop_in_shared_channel_pauses_only_the_senders_goal(runner, monkeypatch):
+    """REPRODUCTION of the #dsh incident (2026-11-22, 08:26).
+
+    Two humans share one Discord channel. ``group_sessions_per_user`` (default
+    True) gives each participant their own session, and a goal is stored per
+    session id (``goal:<session_id>``), so the channel runs one goal loop per
+    human. A plain-text ``stop`` resolves the session from the SENDER's source
+    (``_pause_goal_for_stop``), so it pauses only the sender's goal: the loop
+    every human sees in the room keeps running under the other participant.
+
+    Live evidence: xyossy "stop the goal" -> only session
+    20261122_072835_32ab15d4 paused; parsayazdani's continuations followed at
+    08:26:52 and 08:27:47.
+    """
+    from gateway.session import build_session_key
+    from hermes_cli.goals import GoalManager
+
+    keys = {}
+
+    def _key(source):
+        keys[source.user_id] = build_session_key(source, group_sessions_per_user=True)
+        return keys[source.user_id]
+
+    monkeypatch.setattr(runner, "_session_key_for_source", _key)
+
+    yee = _source(user_id="392686399226380294", chat_type="group")
+    quix = _source(user_id="366829983294816258", chat_type="group")
+    assert yee.chat_id == quix.chat_id
+
+    entries = {}
+    for who in (yee, quix):
+        entry = await runner.async_session_store.get_or_create_session(who, touch_activity=False)
+        entries[who.user_id] = entry
+        GoalManager(session_id=entry.session_id).set(f"goal of {who.user_id}")
+        _key(who)
+
+    # Distinct sessions in ONE chat: the precondition the defect needs.
+    assert entries[yee.user_id].session_id != entries[quix.user_id].session_id
+
+    runner._schedule_auto_goal_intent(_event("stop", source=yee), keys[yee.user_id])
+    await _drain(runner)
+
+    statuses = {
+        uid: GoalManager(session_id=entry.session_id).state.status
+        for uid, entry in entries.items()
+    }
+    # "stop the goal" means the loop this room sees, not the sender's own copy.
+    assert statuses == {yee.user_id: "paused", quix.user_id: "paused"}, statuses
 
 
 @pytest.mark.asyncio

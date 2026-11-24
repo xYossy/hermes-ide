@@ -8,43 +8,28 @@ import pytest
 
 from plugins.speed_channels.core import (
     category_name,
-    channel_names,
     fmt_latency,
-    fmt_speed,
     fmt_time,
+    fmt_tokens,
     fmt_ts,
 )
 
 
-def test_fmt_speed_units():
-    assert fmt_speed(0) == "0 B/s"
-    assert fmt_speed(512) == "512 B/s"
-    assert fmt_speed(1023.9) == "1023 B/s"
-    assert fmt_speed(2048) == "2 KB/s"
-    assert fmt_speed(2.5 * 1024 ** 2) == "2.5 MB/s"
-    assert fmt_speed(3 * 1024 ** 3) == "3.00 GB/s"
+@pytest.mark.parametrize(
+    "count, expected",
+    [
+        (0, "0"),
+        (999, "999"),
+        (12_400, "12.4k"),
+        (9_725_717, "9.7M"),
+    ],
+)
+def test_fmt_tokens_units(count, expected):
+    assert fmt_tokens(count) == expected
 
 
-def test_fmt_speed_clamps_negatives():
-    """A missing field parses as 0, a negative must never print as such."""
-    assert fmt_speed(-4096) == "0 B/s"
-
-
-def test_channel_names_exact_shape():
-    names = channel_names(
-        qbit_dl=2.5 * 1024 ** 2,
-        qbit_queue=5,
-        sab_dl=1.1 * 1024 ** 2,
-        sab_queue=12,
-        slsk_dl=340 * 1024,
-        slsk_up=96 * 1024,
-        slsk_queue=3,
-    )
-    assert names == {
-        "qbittorrent": "qBittorrent: 2.5 MB/s ↓ • 5 in queue",
-        "sabnzbd": "SABnzbd: 1.1 MB/s ↓ • 12 in queue",
-        "slskd": "slskd: 340 KB/s ↓ • 96 KB/s ↑ • 3 in queue",
-    }
+def test_fmt_tokens_clamps_negatives():
+    assert fmt_tokens(-5) == "0"
 
 
 def test_clock_format_is_12_hour_no_leading_zero():

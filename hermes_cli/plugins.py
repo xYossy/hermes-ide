@@ -737,6 +737,18 @@ class PluginContext:
     # Fail-closed by construction: any failure to read consent state inside plugin_capability_granted
     # returns False. The profile-scoped config is passed through so a multi-profile process consults THIS
     # manager's home, never the active profile's (#65593 constraint).
+    def progress(self, text: Any, *, session_id: str = "", session_key: str = "") -> bool:
+        """Append one line to the running turn's native progress bubble.
+
+        The line lands in the same queue the core drains, so throttle, overflow split and
+        cleanup stay core-owned. False when no turn is running; never raises.
+        """
+        try:
+            from hermes_cli.progress_bridge import push_progress
+        except Exception:
+            return False
+        return push_progress(text, session_id=session_id or None, session_key=session_key or None)
+
     def inject_message(
         self, content: str, role: str = "user", *, session_key: str | None = None,
     ) -> bool:

@@ -2,6 +2,7 @@ from gateway.response_filters import (
     is_autonomous_silence_response,
     is_intentional_silence_agent_result,
     is_intentional_silence_response,
+    strip_model_control_tokens,
 )
 
 
@@ -41,3 +42,20 @@ def test_autonomous_lane_agrees_with_interactive_lane_on_cjk_punctuation_variant
     for variant in ("【静默】", "静默。", "【沉默】", "沉默。", "**[静默]**", "NO_REPLY."):
         assert is_intentional_silence_response(variant)
         assert is_autonomous_silence_response(variant) == is_intentional_silence_response(variant), variant
+
+
+def test_model_control_token_markup_is_stripped():
+    bar = "\uff5c"
+    leaked = f"💬 </{bar}DSML{bar} parameter>\n</{bar}DSML{bar} invoke>\n</{bar}DSML{bar} calls>"
+    assert strip_model_control_tokens(leaked).strip() == "💬"
+    assert strip_model_control_tokens(f"before <{bar}end{bar}> after") == "before  after"
+
+
+def test_plain_text_and_ascii_markup_are_untouched():
+    assert strip_model_control_tokens("a < b and c > d") == "a < b and c > d"
+    assert strip_model_control_tokens("") == ""
+    assert strip_model_control_tokens("no markup here") == "no markup here"
+
+
+def test_ascii_control_token_is_stripped():
+    assert strip_model_control_tokens("answer<|im_end|>") == "answer"

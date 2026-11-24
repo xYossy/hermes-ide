@@ -693,6 +693,8 @@ class TurnRunner(_TurnRunnerCore):
         # Narration hold opened this box: show the row text, not a (×N) rewrite.
         # A content-bubble ``__reset__`` still uses the counted retry form.
         plain_repeats: bool = False
+        # Metrics line a plugin keeps pinned under the bubble (the core owns the rows).
+        footer_text: str = ""
 
     def _progress_edit_state(self, adapter) -> "TurnRunner._ProgressEditState":
         ctx = self._ctx
@@ -737,7 +739,8 @@ class TurnRunner(_TurnRunnerCore):
         # messages and non-editable fallback sends.
         from gateway.display_config import format_progress_group
 
-        return format_progress_group(lines)
+        footer = getattr(st, "footer_text", "")
+        return format_progress_group([*lines, footer] if footer else lines)
 
     async def _send_progress_row(self, st, row):
         """Send one row as its own message(s): "separate" grouping and non-editable fallbacks.
@@ -988,6 +991,11 @@ class TurnRunner(_TurnRunnerCore):
         losing repeat counters).
         """
         from gateway.display_config import chunk_oversized_progress_row, repeat_row_text
+
+        if isinstance(raw, tuple) and len(raw) == 2 and raw[0] == "__footer__":
+            # A plugin pins its metrics line under the rows this runner renders.
+            st.footer_text = str(raw[1] or "")
+            return st.footer_text
 
         if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
             _, base_msg, count = raw
@@ -1462,13 +1470,9 @@ class TurnRunner(_TurnRunnerCore):
             from tools.tool_status import get_tool_status_call_id, is_agent_viewer_status_line
 
             if is_agent_viewer_status_line(prepared):
-                try:
-                    viewer_call_id = get_tool_status_call_id()
-                except Exception:
-                    viewer_call_id = None
-                ctx.progress_queue.put(
-                    _agent_status_queue_marker(event_type, prepared, viewer_call_id)
-                )
+                # Viewer notices belong in the status bubble as a row, not as their own card
+                # message (Yee, 2026-11-19).
+                ctx.progress_queue.put(f"🔀 {prepared}")
                 return
 
         def present():

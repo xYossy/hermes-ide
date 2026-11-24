@@ -82,8 +82,12 @@ class GatewayGoalAutoMixin:
         ContextVars (profile secret scope) preserved.
         """
         from hermes_cli.goal_intent import AUTO_GOAL_CONFIDENCE_MIN, CLASSIFICATION_LABELS
+        from hermes_cli.goals import goals_disabled
 
         try:
+            # Single entry point for start/append/approval/chase: one gate covers all four.
+            if goals_disabled():
+                return None
             label = str(decision.get("label") or "unknown")
             confidence = _confidence_of(decision)
             # chat / unknown / low confidence: nothing to do — the raw label and
@@ -270,14 +274,39 @@ class GatewayGoalAutoMixin:
         if not sid:
             return
 
+        # Pause every goal that shares this chat, not just the sender's session.
+        sids = {sid}
+        try:
+            sessions = self.async_session_store.list_sessions()
+            if hasattr(sessions, "__await__"):
+                sessions = await sessions
+            for entry in sessions:
+                origin = getattr(entry, "origin", None)
+                if origin is not None and getattr(origin, "chat_id", None) == getattr(source, "chat_id", None):
+                    entry_sid = getattr(entry, "session_id", None)
+                    if entry_sid:
+                        sids.add(entry_sid)
+        except Exception:
+            sids = {sid}
+
         def _pause():
             from hermes_cli.goals import GoalManager
 
-            return GoalManager(session_id=sid).pause(reason="user said stop")
+            first_state = None
+            paused_count = 0
+            for one in sorted(sids):
+                state = GoalManager(session_id=one).pause(reason="user said stop")
+                if state is not None:
+                    paused_count += 1
+                    if first_state is None:
+                        first_state = state
+            if paused_count > 1:
+                logger.info("auto-goal: paused %d goal(s) in chat after 'stop'", paused_count)
+            elif paused_count == 1:
+                logger.info("auto-goal: paused goal for session %s after 'stop'", sid)
+            return first_state
 
         try:
             state = await self._run_in_executor_with_context(_pause)
-            if state is not None:
-                logger.info("auto-goal: paused goal for session %s after 'stop'", sid)
         except Exception as exc:
             logger.debug("auto-goal stop pause failed: %s", exc)

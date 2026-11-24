@@ -281,3 +281,48 @@ class TestGatewayConfigRoundtrip:
         assert [(r.name, r.user_id, r.enabled, r.specificity) for r in restored] == [
             ("sender", "aad-456", True, 16), ("off", None, False, 4),
         ]
+
+
+class TestPerUserSelectionInOneChannel:
+    """REPRODUCTION (core issue, 2026-11-22): two humans, one Discord channel.
+
+    Channel-scoped routing cannot tell participants apart. The live gateway
+    carries zero Discord routes (``gateway.profile_routes`` holds three
+    WhatsApp chat entries only), so both humans select the same runtime
+    profile — the default — which carries ONE MEMORY.md / USER.md pair. A
+    ``user_id`` discriminator is the only thing that separates them, and no
+    route uses it. This pins today's selection so a change in it is visible.
+    """
+
+    YEE = "392686399226380294"
+    QUIX = "366829983294816258"
+    GUILD = "1073124563619168347"
+    CHANNEL = "1529283530331390063"
+
+    @classmethod
+    def _profile_for(cls, routes, user_id):
+        match = match_profile_route(
+            routes, "discord", guild_id=cls.GUILD, chat_id=cls.CHANNEL, user_id=user_id,
+        )
+        return match.profile if match else None
+
+    def test_channel_routes_cannot_distinguish_participants(self):
+        # The live table has no Discord entry; WhatsApp chat routes never match.
+        routes = parse_profile_routes([
+            {"name": "selfchat-wa", "platform": "whatsapp",
+             "chat_id": "95052726538382@lid", "profile": "selfchat"},
+            {"name": "leon-wa", "platform": "whatsapp",
+             "chat_id": "243851767861413@lid", "profile": "leon"},
+        ])
+        yee = self._profile_for(routes, self.YEE)
+        quix = self._profile_for(routes, self.QUIX)
+        # Same selection for two different humans: there is no per-user decision.
+        assert yee == quix is None
+
+    def test_user_id_route_is_the_only_discriminator(self):
+        routes = parse_profile_routes([
+            {"name": "quix-discord", "platform": "discord",
+             "user_id": self.QUIX, "profile": "quix"},
+        ])
+        assert self._profile_for(routes, self.QUIX) == "quix"
+        assert self._profile_for(routes, self.YEE) is None

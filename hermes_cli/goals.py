@@ -60,9 +60,21 @@ _MAX_BARRIER_WAIT_S = 30 * 60
 _GATE_OUTPUT_TAIL_CHARS = 3000
 
 
+_JUDGE_REJECTION_TEMPLATE = (
+    "[Judge rejected your last response]\n"
+    "Reason: {reason}\n"
+    "{repeat_note}"
+    "Do not repeat that response. Close the named gap with concrete evidence, or say "
+    "plainly that the criterion cannot be met and stop.\n\n"
+)
+_JUDGE_REPEAT_NOTE_TEMPLATE = (
+    "The same reason came back {n} turns in a row - change your approach, not the wording.\n"
+)
+
 CONTINUATION_PROMPT_TEMPLATE = (
     "[Continuing toward your standing goal]\n"
     "Goal: {goal}\n\n"
+    "{judge_block}"
     "Continue working toward this goal. Take the next concrete step. "
     "If you believe the goal is complete, state so explicitly and stop. "
     "If you are blocked and need input from the user, say so clearly and stop."
@@ -73,6 +85,7 @@ CONTINUATION_PROMPT_TEMPLATE = (
 CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE = (
     "[Continuing toward your standing goal]\n"
     "Goal: {goal}\n\n"
+    "{judge_block}"
     "Completion contract:\n"
     "{contract_block}\n\n"
     "Continue working toward the outcome above. Take the next concrete step. "
@@ -87,6 +100,7 @@ CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE = (
 CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE = (
     "[Continuing toward your standing goal]\n"
     "Goal: {goal}\n\n"
+    "{judge_block}"
     "Additional criteria the user added mid-loop:\n"
     "{subgoals_block}\n\n"
     "Continue working toward the goal AND all additional criteria. Take "
@@ -342,6 +356,9 @@ class GoalState:
     last_turn_at: float = 0.0
     last_verdict: Optional[str] = None        # "done" | "blocked" | "continue" | "wait" | "skipped"
     last_reason: Optional[str] = None
+    # Consecutive CONTINUE verdicts carrying the identical reason; drives the repeat note in the
+    # continuation prompt.
+    judge_repeat: int = 0
     paused_reason: Optional[str] = None       # why we auto-paused (budget, etc.)
     consecutive_parse_failures: int = 0       # judge-output parse failures in a row
     # Tracked separately from parse failures: a broken API key returns 401 every call and must
@@ -382,6 +399,7 @@ class GoalState:
             max_turns=int(data.get("max_turns") or DEFAULT_MAX_TURNS),
             last_verdict=data.get("last_verdict"),
             last_reason=data.get("last_reason"),
+            judge_repeat=int(data.get("judge_repeat") or 0),
             paused_reason=data.get("paused_reason"),
             subgoals=[str(s).strip() for s in raw_subgoals if str(s).strip()] if isinstance(raw_subgoals, list) else [],
             waiting_on_pid=(int(data["waiting_on_pid"]) if data.get("waiting_on_pid") else None),
@@ -995,6 +1013,43 @@ def _decision(status, should_continue: bool, prompt: Optional[str], verdict: str
             "verdict": verdict, "reason": reason, "message": message}
 
 
+# Global kill switch for the automatic goal loop (/goalstop, /goalstart). A sentinel file, not
+# config.yaml: it must flip hot across every session without a gateway restart or a config write.
+GOALS_OFF_SENTINEL = "GOALS_OFF"
+
+
+def goals_off_path() -> Path:
+    from agent.file_safety import _hermes_home_path
+
+    return _hermes_home_path() / GOALS_OFF_SENTINEL
+
+
+def goals_disabled() -> bool:
+    # Fail OPEN on stat errors: an unreadable sentinel must not silently kill every goal.
+    try:
+        return goals_off_path().exists()
+    except OSError:
+        return False
+
+
+def set_goals_disabled(disabled: bool) -> bool:
+    """Engage or lift the global goal kill switch. True only when the state actually changed."""
+    path = goals_off_path()
+    try:
+        if disabled:
+            if path.exists():
+                return False
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"disabled_at": time.time()}), encoding="utf-8")
+            return True
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+    except OSError:
+        return False
+
+
 
 class GoalManager:
     """Per-session goal state + continuation decisions.
@@ -1391,6 +1446,9 @@ class GoalManager:
         state = self._state
         if state is None or state.status != "active":
             return _decision(state.status if state else None, False, None, "inactive", "no active goal", "")
+        # Status is left alone: an active goal resumes where it stopped once the switch is lifted.
+        if goals_disabled():
+            return _decision(state.status, False, None, "skipped", "goals disabled (/goalstart to re-enable)", "")
 
         # Parked on a live process or an unexpired deadline: quiesce without burning a turn.
         if self.is_waiting():
@@ -1411,6 +1469,11 @@ class GoalManager:
             state.goal, last_response, subgoals=state.subgoals or None, background_processes=background_processes,
             contract=state.contract if state.has_contract() else None, active_delegations=active_delegations,
         )
+        same_repeat = (
+            verdict == "continue" and state.last_verdict == "continue"
+            and bool(reason) and reason.strip() == (state.last_reason or "").strip()
+        )
+        state.judge_repeat = state.judge_repeat + 1 if same_repeat else (1 if verdict == "continue" else 0)
         state.last_verdict = verdict
         state.last_reason = reason
         # Parse failures reset on any usable reply INCLUDING transport errors, so a flaky network
@@ -1475,15 +1538,22 @@ class GoalManager:
         s = self._state
         if not s or s.status != "active":
             return None
+        judge_block = ""
+        if s.last_verdict == "continue" and s.last_reason:
+            repeat_note = (_JUDGE_REPEAT_NOTE_TEMPLATE.format(n=s.judge_repeat)
+                           if s.judge_repeat >= 2 else "")
+            judge_block = _JUDGE_REJECTION_TEMPLATE.format(reason=s.last_reason, repeat_note=repeat_note)
         # Contract first (it carries the verification surface); subgoals fold in as extra criteria.
         if s.has_contract():
             contract_block = s.contract.render_block()
             if s.subgoals:
                 contract_block = f"{contract_block}\n{_render_extra_criteria(s.subgoals)}"
-            return CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(goal=s.goal, contract_block=contract_block)
+            return CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(
+                goal=s.goal, judge_block=judge_block, contract_block=contract_block)
         if s.subgoals:
-            return CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE.format(goal=s.goal, subgoals_block=s.render_subgoals_block())
-        return CONTINUATION_PROMPT_TEMPLATE.format(goal=s.goal)
+            return CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE.format(
+                goal=s.goal, judge_block=judge_block, subgoals_block=s.render_subgoals_block())
+        return CONTINUATION_PROMPT_TEMPLATE.format(goal=s.goal, judge_block=judge_block)
 
     def render_contract(self) -> str:
         """Public helper for the /goal show + /goal draft slash commands."""
@@ -1501,4 +1571,5 @@ __all__ = [
     "JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE", "JUDGE_USER_PROMPT_WITH_CONTRACT_TEMPLATE",
     "DRAFT_CONTRACT_SYSTEM_PROMPT",
     "DEFAULT_MAX_TURNS", "load_goal", "save_goal", "clear_goal", "migrate_goal_to_session", "judge_goal",
+    "goals_off_path", "goals_disabled", "set_goals_disabled",
 ]

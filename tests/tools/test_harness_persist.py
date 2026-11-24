@@ -44,7 +44,22 @@ def test_detached_wrapper_is_not_a_py_file(tmp_path, monkeypatch):
     assert not runner_arg.endswith(".py")
 
 def _stop(unit: str) -> None:
-    subprocess.run(["systemctl", "stop", unit], check=False, timeout=30)
+    for prefix in (["--user"], []):
+        result = subprocess.run(["systemctl", *prefix, "stop", unit], check=False, timeout=30)
+        if result.returncode == 0:
+            return
+
+
+def _start_unit(argv: list[str]) -> None:
+    """Start a unit in the first systemd scope that accepts systemd-run here."""
+    for prefix in (["--user"], []):
+        try:
+            subprocess.run(["systemd-run", *prefix, *argv], check=True, capture_output=True,
+                           text=True, timeout=30)
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            continue
+    raise RuntimeError("systemd-run unusable in the system and the user scope")
 
 
 def test_detached_harness_survives_caller_unit_stop():
@@ -72,14 +87,11 @@ def test_detached_harness_survives_caller_unit_stop():
         "time.sleep(120)\n" % (str(Path(__file__).resolve().parents[2]), str(work), str(receipt))
     )
     try:
-        subprocess.run(
-            [
-                "systemd-run", "--collect", f"--unit={caller}", "--property=KillMode=mixed",
-                "--property=Type=exec", f"--working-directory={work}", "--",
-                sys.executable, str(worker),
-            ],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
+        _start_unit([
+            "--collect", f"--unit={caller}", "--property=KillMode=mixed",
+            "--property=Type=exec", f"--working-directory={work}", "--",
+            sys.executable, str(worker),
+        ])
         deadline = time.time() + 20
         while time.time() < deadline and not receipt.exists():
             time.sleep(0.2)

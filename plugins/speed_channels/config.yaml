@@ -10,12 +10,25 @@ speed_channels:
   guild_id: ""
   category_id: ""
 
-  # Minimum seconds between downloader polls. The tick itself is meant to run
-  # every minute (renaming is cheap); this self-gates the qBittorrent/SABnzbd/
-  # slskd API calls so a 1-minute cron does not hammer them.
-  poll_interval_seconds: 300
+  # Minimum seconds between vitals ticks. The tick itself runs every few
+  # minutes; this self-gates the cheap reads and the Discord renames.
+  poll_interval_seconds: 600
+
+  # Interface the WAN rate is read from; empty resolves the default route
+  # at tick time. The rate is a 3 s delta of the interface's own byte
+  # counters, so nothing is downloaded.
+  wan_interface: ""
+
+  # LAN IPs of Shelly PlusPlugS plugs. An offline plug is fine: the Power
+  # channel sums the plugs that answer and shows "N/M online".
+  shelly_hosts: []
+
+  # Optional. Defaults to HERMES_HOME/state.db (Hermes's session store, opened
+  # read-only). Set it only when the database lives somewhere else.
+  # state_db: ""
 
   channel_ids:
-    qbittorrent: ""
-    sabnzbd: ""
-    slskd: ""
+    power: ""
+    wan: ""
+    spend: ""
+    agents: ""

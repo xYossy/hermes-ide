@@ -15,17 +15,17 @@ from plugins.speed_channels.core import (
 SPEED_CHANNELS_TICK_SCHEMA = {
     "name": "speed_channels_tick",
     "description": (
-        "Run one Discord speed-channel tick: optionally poll qBittorrent, "
-        "SABnzbd and slskd and rename their voice channels (self-gated), "
-        "always refresh the Speeds category label (live 1.1.1.1 ICMP latency "
-        "plus the next-poll countdown)."
+        "Run one Discord vitals tick: rewrite the Power, WAN, Spend and Agents "
+        "voice-channel names (self-gated; the WAN rate comes from this host's "
+        "uplink counters) and refresh the Speeds category label (live 1.1.1.1 "
+        "ICMP latency plus the next-poll countdown)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "force": {
                 "type": "boolean",
-                "description": "Bypass the poll-interval gate and poll all three downloaders.",
+                "description": "Bypass the channel-poll gate.",
             }
         },
         "additionalProperties": False,

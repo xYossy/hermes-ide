@@ -400,7 +400,9 @@ class DiscordHubClientAdapter(HubOverlapClientMixin, BasePlatformAdapter):
             # adapter has no profile scope, so its judge credential and everything its
             # config watcher needs travel in this attach payload over the same-user
             # socket; none of it is logged or persisted.
-            gate_credential = platform_gate_env("LITELLM_API_KEY") or None
+            gate_credential = (
+                platform_gate_env("LITELLM_API_KEY") or platform_gate_env("OPENCODE_GO_API_KEY") or None
+            )
             # Same discipline for the allow/deny gates: snapshot them HERE, under this
             # profile's scope. The hub-side adapter has no profile scope, so its per-adapter
             # gate snapshot travels in the attach payload; explicit empty values keep a

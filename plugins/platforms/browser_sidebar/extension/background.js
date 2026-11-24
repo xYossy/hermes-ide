@@ -17,7 +17,7 @@
 
 'use strict';
 
-const WS_URL = 'ws://server.tailea4ecb.ts.net:8796/ws';
+const WS_URL = 'ws://192.168.2.201:8796/ws';
 const KEEPALIVE_ALARM = 'bs-keepalive';
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 60000;
@@ -214,6 +214,15 @@ async function connect() {
     token = stored.token;
   } catch {
     token = null;
+  }
+  if (!token) {
+    // Fallback: token.txt next to the extension, so a fresh install connects without the popup.
+    try {
+      const res = await fetch(chrome.runtime.getURL('token.txt'));
+      if (res.ok) token = (await res.text()).trim();
+    } catch {
+      token = null;
+    }
   }
   if (!token) {
     setStatus(false, 'no token saved');

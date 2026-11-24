@@ -1609,7 +1609,9 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         if self._hub_gate_credential is not None:
             self._response_gate_credential = self._hub_gate_credential or None
         else:
-            self._response_gate_credential = _scoped_gate_env("LITELLM_API_KEY") or None
+            self._response_gate_credential = (
+                _scoped_gate_env("LITELLM_API_KEY") or _scoped_gate_env("OPENCODE_GO_API_KEY") or None
+            )
 
     def _response_gate_init(self) -> None:
         """Build the gate from validated config plus the credential captured at startup."""
@@ -1825,9 +1827,13 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         # bridge lock are blocking work a diagnostic must not stall the loop on.
         line = await format_notice_async(record, home)
         if line is not None:
+            conversation = str(
+                candidate.get("conversation_id") or GateRuntime.conversation_id(message.channel)
+            )
+            target = self._jev_notice_target(home)
             await self._send_jev_notice(
-                line,
-                str(candidate.get("conversation_id") or GateRuntime.conversation_id(message.channel)),
+                line if not target or target == conversation else f"[<#{conversation}>] {line}",
+                target or conversation,
                 str(candidate.get("message_id") or ""),
             )
 
@@ -1851,6 +1857,16 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             return _Path(get_profile_dir(source.profile))
         from hermes_constants import get_hermes_home
         return get_hermes_home()
+
+    def _jev_notice_target(self, home: Any) -> str:
+        """``display.jev_notice_channel``: collect every notice in one channel instead of the
+        conversation it reports on. Empty/unreadable config keeps the in-conversation default."""
+        try:
+            from gateway.run import _load_gateway_config
+            display = _load_gateway_config(_Path(home) / "config.yaml").get("display")
+            return str((display or {}).get("jev_notice_channel") or "").strip()
+        except Exception:
+            return ""
 
     async def _send_jev_notice(self, line: str, chat_id: str, message_id: str = "") -> None:
         """Post one Jev classification notice line into the originating conversation.
@@ -2531,7 +2547,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                     parent_id = str(message.channel.parent_id)
                 free_channels = self._discord_free_response_channels()
                 channel_keys = self._discord_channel_keys(message, parent_id)
-                if "*" not in free_channels and not (channel_keys & free_channels):
+                if not self._discord_free_response_match(message, channel_keys, free_channels):
                     # Ambient text that pings a human (not us) would be dropped here by the
                     # legacy prefilter. In a gate-selected channel the probe still records it
                     # so the judge — not this prefilter — decides; the verdict is unchanged.
@@ -3373,8 +3389,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             free_channels = self._discord_free_response_channels()
             if (
                 self._discord_require_mention()
-                and "*" not in free_channels
-                and not (channel_keys & free_channels)
+                and not self._discord_free_response_match(message, channel_keys, free_channels)
                 and not self._in_bot_thread(message)
                 and not self._self_is_explicitly_mentioned(message)
                 # Same rule as live dispatch: in a gate-selected channel the judge decides
@@ -6349,6 +6364,14 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             keys.add(f"#{parent_name}")
         return keys
 
+    def _discord_free_response_match(self, message: Any, channel_keys: Any, free_channels: Any) -> bool:
+        """A thread is free-response only on its own id; parent membership must not exempt it."""
+        if "*" in free_channels:
+            return True
+        if isinstance(getattr(message, "channel", None), discord.Thread):
+            return str(getattr(message.channel, "id", "")) in free_channels
+        return bool(channel_keys & free_channels)
+
     def _discord_thread_require_mention(self) -> bool:
         """Whether threads still require @mention after the bot has participated (default False).
         Set True when multiple bots share a thread to avoid bot-to-bot loops."""
@@ -7762,10 +7785,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 return False
             free_channels = self._discord_free_response_channels()
             require_mention = self._discord_require_mention()
-            is_free_channel = (
-                "*" in free_channels
-                or bool(channel_keys & free_channels)
-            )
+            is_free_channel = self._discord_free_response_match(message, channel_keys, free_channels)
             in_bot_thread = self._in_bot_thread(message)
             # An enforce-approved ambient message was already admitted by the gate in
             # _dispatch_discord_message; this is the same decision, not a new exemption.

@@ -14,8 +14,9 @@ from plugins.home_server.core import (
     template_fingerprint,
 )
 
-# 5 categories + 2 chat + 4 memory + 3 notifications + 4 model voices + 3 speeds.
-FIRST_RUN_CREATES = 5 + 2 + 4 + 3 + 4 + 3
+# 5 categories + 3 notifications + 2 chat + 4 memory + 4 model voices + 4 speeds
+# (Agents is the fourth vitals channel; Power/WAN/Spend adopt the old names instead).
+FIRST_RUN_CREATES = 5 + 3 + 2 + 4 + 4 + 4
 
 
 def test_first_run_creates_the_whole_template(hermes, guild, make_discord):
@@ -221,7 +222,7 @@ def test_disabled_modules_are_skipped_entirely(
 
     names = {c["name"] for c in discord.channels.values()}
     assert "Speeds" not in names
-    assert "qBittorrent" not in names
+    assert "Power" not in names
     assert "Lounges" in names and "Models" in names
 
     # Disabled modules must not be wired either.
@@ -612,9 +613,10 @@ def test_quota_and_speeds_config_are_written_and_unrelated_keys_kept(
     }
     assert config["speed_channels"]["category_id"] == state()["categories"]["speeds"]
     assert set(config["speed_channels"]["channel_ids"]) == {
-        "qbittorrent",
-        "sabnzbd",
-        "slskd",
+        "power",
+        "wan",
+        "spend",
+        "agents",
     }
     assert (
         config["quota_channels"]["channel_ids"]["codex"]

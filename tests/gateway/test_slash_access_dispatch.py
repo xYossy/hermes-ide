@@ -360,3 +360,60 @@ async def test_gating_isolated_per_platform():
     tg_src = _make_source(platform=Platform.SLACK, user_id="999", chat_id="t1")
     result = await runner._handle_message(_make_event("/whoami", tg_src))
     assert "Tier: unrestricted" in result
+
+
+# ---------------------------------------------------------------------------
+# /goalstop is a global kill switch, so it must be admin-only whenever slash
+# gating is configured. The dispatch gate is command-agnostic; these tests
+# pin that /goalstop actually goes through it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def goals_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home
+
+
+@pytest.mark.asyncio
+async def test_goalstop_refused_for_non_admin_and_leaves_switch_untouched(goals_home):
+    from hermes_cli.goals import goals_disabled, goals_off_path
+
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": ["111"],
+            "user_allowed_commands": [],
+        }
+    )
+    handler = AsyncMock(return_value="goalstop-handled")
+    runner._handle_goalstop_command = handler
+
+    result = await runner._handle_message(_make_event("/goalstop", _make_source(user_id="999")))
+
+    assert "⛔" in result
+    assert "/goalstop is admin-only here" in result
+    handler.assert_not_awaited()
+    assert goals_disabled() is False
+    assert not goals_off_path().exists()
+
+
+@pytest.mark.asyncio
+async def test_goalstop_dispatched_for_admin(goals_home):
+    from hermes_cli.goals import goals_disabled, set_goals_disabled
+
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": ["111"],
+            "user_allowed_commands": [],
+        }
+    )
+    try:
+        result = await runner._handle_message(_make_event("/goalstop", _make_source(user_id="111")))
+
+        assert "⛔" not in (result or "")
+        assert "Goals off" in (result or "")
+        assert goals_disabled() is True
+    finally:
+        set_goals_disabled(False)

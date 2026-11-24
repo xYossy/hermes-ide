@@ -288,7 +288,7 @@ def _run_omp_goal_process(
         tools_allowlist=spec.get("tools_allowlist"),
         config_overlay=overlay, session_dir=session_dir,
     )
-    env = build_subprocess_env(extra={"LITELLM_API_KEY": api_key})
+    env = build_subprocess_env(extra={"LITELLM_API_KEY": api_key, "OPENCODE_GO_API_KEY": api_key})
     process = subprocess.Popen(
         argv, cwd=str(directory), env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -760,7 +760,7 @@ def run_omp_lane(
         api_key = _litellm_api_key(config)
         with _soul_file(str(spec.get("soul") or "")) as soul:
             mcp_path = stage_mcp_config(directory, spec.get("mcp"))
-            env = build_subprocess_env(extra={"LITELLM_API_KEY": api_key})
+            env = build_subprocess_env(extra={"LITELLM_API_KEY": api_key, "OPENCODE_GO_API_KEY": api_key})
             binary = str(config.get("binary") or "omp")
             timeout = int(timeout_seconds) if int(timeout_seconds) > 0 else 0
             restore_path = None

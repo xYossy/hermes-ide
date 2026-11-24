@@ -1,7 +1,7 @@
 """Auto-goal intent classification via Jev Decisions, JSONL audit trail, and report.
 
 Every eligible human gateway message is classified as CHAT, TASK, APPROVAL, or
-CHASE by one Jev Decisions POST (model ``jev-1.14.0``) and appended to a
+CHASE by one Jev Decisions POST (model ``jev-1.13-free``) and appended to a
 private JSONL log. There is no LLM fallback: transport/HTTP/schema failures are
 retried once and then fail closed as ``unknown``. Only a CHASE at or above the
 action confidence floor (the same ``AUTO_GOAL_CONFIDENCE_MIN`` auto-goal
@@ -42,12 +42,12 @@ CHASE_DEDUPE_WINDOW = timedelta(minutes=30)
 # recognize the exchange, short enough to keep the papercut readable.
 _CHASE_SNIPPET_LIMIT = 200
 
-# Jev Decisions endpoint (same fixed URL the Discord response gate posts to; the
-# string is duplicated rather than imported so hermes_cli never depends on a
-# platform plugin module). Direct to the litellm proxy fronting TypeSafe's Jev;
-# the credential is a litellm virtual key (LITELLM_API_KEY).
-JEV_DECISIONS_URL = "http://192.168.30.21:4000/jev/decisions"
-JEV_MODEL = "jev-1.14.0"
+# Jev Decisions endpoint: OpenCode native System One API. Env-overridable so a
+# litellm proxy can front it again. Credential preference: LITELLM_API_KEY, then
+# OPENCODE_GO_API_KEY. The string is duplicated in response_gate.py rather than
+# imported, so hermes_cli never depends on a platform plugin module.
+JEV_DECISIONS_URL = os.environ.get("JEV_DECISIONS_URL") or "https://opencode.ai/inference/systemone/v1/systemone"
+JEV_MODEL = os.environ.get("JEV_MODEL") or "jev-1.13-free"
 _JEV_TIMEOUT_S = 8.0
 _JEV_ATTEMPTS = 2  # one retry on transport/HTTP/schema failure, then fail closed
 
@@ -185,19 +185,28 @@ def _unknown(reason: str) -> Dict[str, Any]:
 
 
 def _litellm_credential() -> str:
-    """LITELLM_API_KEY (litellm virtual key) through the agent secret scope; unscoped
-    paths read os.environ.
+    """Jev credential: LITELLM_API_KEY, then OPENCODE_GO_API_KEY, through the agent
+    secret scope; unscoped paths read os.environ in the same order.
 
     Mirrors ``agent.auxiliary_client._scoped_key_env``: with a profile scope
     installed its verdict is authoritative (a scoped miss never borrows another
     profile's key). The value is never logged.
     """
+    names = ("LITELLM_API_KEY", "OPENCODE_GO_API_KEY")
     with contextlib.suppress(Exception):
         from agent.secret_scope import UnscopedSecretError, get_secret
 
         with contextlib.suppress(UnscopedSecretError):
-            return (get_secret("LITELLM_API_KEY") or "").strip()
-    return (os.getenv("LITELLM_API_KEY") or "").strip()
+            for name in names:
+                value = (get_secret(name) or "").strip()
+                if value:
+                    return value
+            return ""
+    for name in names:
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def build_intent_question() -> Dict[str, Any]:
@@ -310,7 +319,7 @@ def classify(
     }
     credential = _litellm_credential()
     if not credential:
-        logger.debug("goal intent classification unavailable: no LITELLM_API_KEY")
+        logger.debug("goal intent classification unavailable: no LITELLM_API_KEY or OPENCODE_GO_API_KEY")
         return _unknown("classification unavailable: no litellm virtual key")
 
     payload = {

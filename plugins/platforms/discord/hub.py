@@ -18,6 +18,7 @@ import os
 import socket
 import struct
 import tempfile
+import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -38,6 +39,37 @@ from hermes_constants import get_default_hermes_root
 logger = logging.getLogger(__name__)
 
 Delivery = Callable[[str, Dict[str, Any]], Awaitable[None]]
+
+
+def _tps_activity(path: Path) -> "tuple[Any, float]":
+    """Presence activity + refresh interval from the discord-tps state file.
+
+    The gateway runs the plugin but owns no discord.py client in hub mode, so
+    the plugin only writes this file and the hub is what publishes presence.
+    Returns (None, 20.0) when the file is missing or unreadable.
+    """
+    import discord
+
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, 20.0
+    interval = float(max(10, int(state.get("interval") or 20)))
+    model = str(state.get("model") or "").strip()
+    idle = time.time() - float(state.get("ts") or 0) > float(state.get("idle_after") or 300)
+    text = str(state.get("idle_text") or "idle") if idle else f"{float(state.get('rate') or 0):.0f} tok/s"
+    if model:
+        text = f"{text} · {model}"
+    kind = str(state.get("activity_type") or "custom").strip().lower()
+    if kind == "custom":
+        return discord.CustomActivity(name=text), interval
+    types = {
+        "playing": discord.ActivityType.playing,
+        "listening": discord.ActivityType.listening,
+        "watching": discord.ActivityType.watching,
+        "competing": discord.ActivityType.competing,
+    }
+    return discord.Activity(type=types.get(kind, discord.ActivityType.custom), name=text), interval
 
 
 def _pid_gone(pid: Optional[int]) -> bool:
@@ -410,6 +442,9 @@ class DiscordHubServer:
         from plugins.platforms.browser_sidebar.hub import BrowserSidebarHub
         self.browser_sidebar = BrowserSidebarHub()
         self._stopping = False
+        self._tps_task: Optional[asyncio.Task] = None
+        # client id -> text last published, so a reconnect re-sends presence
+        self._tps_published: Dict[int, str] = {}
 
     def _router_for(self, token_key: str) -> DiscordSessionRouter:
         router = self._routers.get(token_key)
@@ -440,9 +475,15 @@ class DiscordHubServer:
         )
         self.socket_path.chmod(0o600)
         logger.info("Discord hub listening on %s (pid %s)", self.socket_path, os.getpid())
+        self._tps_task = asyncio.create_task(self._publish_tps_presence())
 
     async def stop(self) -> None:
         self._stopping = True
+        if self._tps_task is not None:
+            self._tps_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._tps_task
+            self._tps_task = None
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -602,6 +643,7 @@ class DiscordHubServer:
                     raise RuntimeError("Discord hub is stopping")
                 self._adapters[key] = adapter
                 self._adapter_tokens[key] = config.token
+                self._install_clear_reaction_bridge(adapter)
             except BaseException:
                 profiles = self._adapter_profiles.get(key)
                 if profiles is not None:
@@ -639,6 +681,75 @@ class DiscordHubServer:
             except Exception:
                 # The failed instance is already evicted, so a later attach can retry.
                 logger.exception("Discord hub fatal-adapter cleanup failed")
+
+    CLEAR_EMOJI = "🧹"
+
+    def _install_clear_reaction_bridge(self, adapter: Any) -> None:
+        """🧹 on any message = native /new for the clicker.
+
+        The gateway process no longer owns discord.py (hub split), so the
+        huhn-channel-clear plugin's on_raw_reaction_add can never fire there.
+        The hub sees the event, so it replays it as a synthetic inbound /new.
+        """
+        client = getattr(adapter, "_client", None)
+        if client is None:
+            return
+
+        async def _on_raw_reaction_add(payload: Any) -> None:
+            try:
+                emoji = getattr(payload, "emoji", None)
+                if str(getattr(emoji, "name", "") or "") != self.CLEAR_EMOJI:
+                    return
+                user_id = str(getattr(payload, "user_id", "") or "")
+                if not user_id or user_id == str(getattr(getattr(client, "user", None), "id", "")):
+                    return
+                channel = client.get_channel(int(payload.channel_id))
+                if channel is None:
+                    channel = await client.fetch_channel(int(payload.channel_id))
+                thread_id, chat_id = adapter._thread_id_and_chat_for_channel(channel)
+                if not chat_id:
+                    return
+                member = getattr(payload, "member", None) or client.get_user(int(user_id))
+                name = getattr(member, "display_name", None) or getattr(member, "name", None)
+                source = adapter.build_source(
+                    chat_id=chat_id, chat_type="thread" if thread_id else "group",
+                    user_id=user_id, user_name=name, thread_id=thread_id,
+                    guild_id=getattr(payload, "guild_id", None),
+                    message_id=str(payload.message_id),
+                )
+                from gateway.platforms.event import MessageEvent, MessageType
+                await adapter.handle_message(MessageEvent(
+                    text="/new", message_type=MessageType.TEXT, source=source,
+                    user_id=user_id, user_name=name, message_id=str(payload.message_id),
+                ))
+                logger.info("clear-reaction: 🧹 from %s in %s -> /new", user_id, chat_id)
+            except Exception:
+                logger.debug("clear-reaction bridge failed", exc_info=True)
+
+        client.add_listener(_on_raw_reaction_add, "on_raw_reaction_add")
+
+    async def _publish_tps_presence(self) -> None:
+        """Mirror the discord-tps state file onto every attached bot's presence."""
+        path = get_default_hermes_root() / "cache" / "discord-tps.json"
+        while not self._stopping:
+            activity, interval = _tps_activity(path)
+            for adapter in list(self._adapters.values()):
+                client = getattr(adapter, "_client", None)
+                ready = getattr(client, "is_ready", None)
+                if activity is None or client is None or not callable(ready) or not ready():
+                    continue
+                if self._tps_published.get(id(client)) == activity.name:
+                    continue
+                try:
+                    await client.change_presence(activity=activity)
+                    self._tps_published[id(client)] = activity.name
+                    logger.info("discord-tps presence: %s", activity.name)
+                    # No INFO sink in the hub, so mirror the last publish where a check can see it.
+                    (get_default_hermes_root() / "cache" / "discord-tps-published.json").write_text(
+                        json.dumps({"text": activity.name, "ts": time.time()}), encoding="utf-8")
+                except Exception:
+                    logger.debug("discord-tps presence update failed", exc_info=True)
+            await asyncio.sleep(interval)
 
     def _make_inbound_handler(self, adapter: Any, token_key: str):
         async def _deliver(event: Any) -> None:

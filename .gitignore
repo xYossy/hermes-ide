@@ -336,3 +336,6 @@ wandb/
 # delegated Claude Code session — working files, never product content (one was
 # committed by accident with #571 and tripped the no-tmp footguns gate).
 .hermes-claude-goal-brief.md
+
+# Sidebar token for unpacked browser installs (deployed per machine, never in git)
+plugins/platforms/browser_sidebar/extension/token.txt

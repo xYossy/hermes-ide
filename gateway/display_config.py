@@ -30,6 +30,9 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     "streaming": None,  # None = follow top-level streaming config
     # Gateway-only assistant/status chatter; mobile platforms opt down to final-answer-first.
     "interim_assistant_messages": True,
+    # Deliver the turn's final answer by editing the open progress bubble instead of
+    # sending a second message (= the answer lives in the status bar).
+    "answer_in_progress": False,
     "suppress_warning_notifications": False,
     "busy_ack_detail": True,
     # When true, delete tool-progress / status bubbles
@@ -196,7 +199,7 @@ def _norm_int(value: Any) -> int:
 _NORMALISERS: dict[str, Any] = {
     # "describe" (fork): one short human explanation (the call's ``description``
     # argument) instead of the raw command/code/argument JSON.
-    "tool_progress": _norm_tristate("all", "off", {"off", "new", "all", "verbose", "log", "compact", "describe"}),
+    "tool_progress": _norm_tristate("all", "off", {"off", "new", "all", "verbose", "log", "compact", "describe", "plugin"}),
     "show_reasoning": _norm_bool,
     "streaming": _norm_bool,
     "interim_assistant_messages": _norm_bool,

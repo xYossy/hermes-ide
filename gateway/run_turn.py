@@ -46,6 +46,48 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
+# A session with a running goal keeps its newest progress bubble: the bar carries the
+# goal's visible header until the goal is done or cleared. Only the newest one is kept
+# (the previous pin is released on the next turn) so a long goal does not leave a trail
+# of bars in the chat.
+_PINNED_PROGRESS_BUBBLE: Dict[str, str] = {}
+
+
+def _goal_keeps_progress_bubble(*session_ids: Optional[str]) -> bool:
+    """True while the session's goal is active or paused. The goal judge runs after
+    delivery, so a turn that finishes its goal may keep its bubble one more turn.
+    Never raises."""
+    try:
+        from hermes_cli.goals import load_goal
+    except Exception:
+        return False
+    for sid in session_ids:
+        if not sid:
+            continue
+        try:
+            state = load_goal(str(sid))
+        except Exception:
+            continue
+        if state is not None and state.status in ("active", "paused"):
+            return True
+    return False
+
+
+def _cleanup_targets(session_id: Optional[str], ids: List[str]) -> List[str]:
+    """Bubbles to delete at turn end. With a running goal the newest bubble is kept as
+    the goal's header and the previously kept one is released instead."""
+    if not ids or not _goal_keeps_progress_bubble(session_id):
+        return ids
+    key = str(session_id or "")
+    previous = _PINNED_PROGRESS_BUBBLE.get(key)
+    pinned = ids[-1]
+    _PINNED_PROGRESS_BUBBLE[key] = pinned
+    targets = list(ids[:-1])
+    if previous and previous != pinned and previous not in targets:
+        targets.append(previous)
+    return targets
+
+
 _tool_call_logger_lock = threading.Lock()
 
 
@@ -2006,6 +2048,28 @@ class GatewayTurnMixin:
             with suppress(Exception):
                 event._streamed_final_response = str(response or "")
             return None
+
+        # answer_in_progress: the final answer replaces the progress bubble instead of arriving
+        # as a second message. Fail-open — any problem falls through to the normal send.
+        if response and adapter is not None and not agent_result.get("failed"):
+            try:
+                from gateway.run import _load_gateway_config, _platform_config_key
+                from gateway.display_config import resolve_display_setting
+                if resolve_display_setting(
+                    _load_gateway_config(), _platform_config_key(source.platform), "answer_in_progress",
+                ):
+                    from hermes_cli.progress_bridge import clear_bubble, resolve_bubble
+                    _bubble = resolve_bubble(session_key=session_key)
+                    if _bubble:
+                        _res = await adapter.edit_message(_bubble[0], _bubble[1], response, finalize=True)
+                        if getattr(_res, "success", False):
+                            clear_bubble(session_key=session_key)
+                            await self._deliver_media_from_response(response, event, adapter)
+                            with suppress(Exception):
+                                event._streamed_final_response = str(response)
+                            return None
+            except Exception:
+                logger.debug("answer-in-progress delivery failed; sending normally", exc_info=True)
 
         return response
 
@@ -6724,7 +6788,7 @@ class GatewayTurnMixin:
             and hasattr(_cleanup_adapter, "register_post_delivery_callback")
         ):
             return
-        _ids_snapshot = list(_cleanup_msg_ids)
+        _ids_snapshot = _cleanup_targets(session_key, list(turn_ctx._cleanup_msg_ids or []))
         _chat_id_snapshot = turn_ctx.source.chat_id
         _loop_snapshot = asyncio.get_running_loop()
 
@@ -7042,9 +7106,15 @@ class GatewayTurnMixin:
 
         # Queue for progress messages (thread-safe)
         progress_queue = queue.Queue() if needs_progress_queue else None
-        # Structured MoA stage embeds require Discord's embed capability and
-        # tool progress. Browser image delivery independently enables the same
-        # turn-scoped subscription below for supported Discord/Matrix adapters.
+        if progress_queue is not None:
+            # Hand the live queue to plugins (statusbar metrics footer): a plugin hook runs
+            # in-process and cannot reach the turn context. Fail-open on an unpatched tree.
+            try:
+                from hermes_cli.progress_bridge import register_progress_queue
+                register_progress_queue(queue=progress_queue, session_key=session_key,
+                                        session_id=session_id)
+            except Exception:
+                logger.debug("progress bridge registration failed", exc_info=True)
         _stage_embed_adapter = None
         if tool_progress_enabled and source.platform == Platform.DISCORD:
             _stage_candidate = self._adapter_for_source(source)
@@ -8300,6 +8370,10 @@ class GatewayTurnMixin:
             # Stop progress sender, stage consumer, interrupt monitor, and notification task.
             if progress_task:
                 progress_task.cancel()
+            if progress_queue is not None:
+                from hermes_cli.progress_bridge import unregister_progress_queue
+                unregister_progress_queue(queue=progress_queue, session_key=session_key,
+                                          session_id=session_id)
             if stage_task:
                 stage_task.cancel()
             if log_task:
@@ -8581,7 +8655,7 @@ class GatewayTurnMixin:
             and not response.get("failed")
             and hasattr(_cleanup_adapter, "register_post_delivery_callback")
         ):
-            _ids_snapshot = list(_cleanup_msg_ids)
+            _ids_snapshot = _cleanup_targets(session_key, list(_cleanup_msg_ids))
             _chat_id_snapshot = source.chat_id
             _adapter_snapshot = _cleanup_adapter
             _loop_snapshot = asyncio.get_running_loop()

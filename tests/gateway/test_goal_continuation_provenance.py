@@ -393,13 +393,15 @@ class TestHumanLookalikeIsNeverSynthetic:
             CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE,
         )
 
+        # judge_block is non-empty: the recognized prefix must hold with the judge-rejection block present.
+        judge_block = "Reason: tests are missing\n\n"
         texts = [
-            CONTINUATION_PROMPT_TEMPLATE.format(goal="ship it"),
+            CONTINUATION_PROMPT_TEMPLATE.format(goal="ship it", judge_block=judge_block),
             CONTINUATION_PROMPT_WITH_CONTRACT_TEMPLATE.format(
-                goal="ship it", contract_block="- tests pass"
+                goal="ship it", judge_block=judge_block, contract_block="- tests pass"
             ),
             CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE.format(
-                goal="ship it", subgoals_block="- no regressions"
+                goal="ship it", judge_block=judge_block, subgoals_block="- no regressions"
             ),
             CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE.format(
                 goal="ship it", command="pytest -q", exit_code=1, attempt=1,

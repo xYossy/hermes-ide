@@ -34,7 +34,7 @@ class FakeAdapter:
 
 def _goal_continuation_event(source, goal="finish the task"):
     return MessageEvent(
-        text=CONTINUATION_PROMPT_TEMPLATE.format(goal=goal),
+        text=CONTINUATION_PROMPT_TEMPLATE.format(goal=goal, judge_block=""),
         message_type=MessageType.TEXT,
         source=source,
     )
