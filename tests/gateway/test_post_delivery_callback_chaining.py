@@ -102,3 +102,49 @@ class TestPostDeliveryCallbackAsyncChaining:
         _invoke(cb)
         assert fired == ["sync", "async"]
 
+
+class TestPostDeliveryCallbackGenerationBump:
+    def test_gen5_popped_at_gen6_fires(self, adapter):
+        fired = []
+        adapter.register_post_delivery_callback(
+            "s", lambda: fired.append("cb"), generation=5
+        )
+        cb = adapter.pop_post_delivery_callback("s", generation=6)
+        assert callable(cb)
+        _invoke(cb)
+        assert fired == ["cb"]
+        # consumed: nothing left pending
+        assert adapter.pop_post_delivery_callback("s") is None
+
+    def test_registering_gen6_after_gen5_does_not_lose_gen5(self, adapter):
+        fired = []
+        adapter.register_post_delivery_callback(
+            "s", lambda: fired.append("cb5"), generation=5
+        )
+        adapter.register_post_delivery_callback(
+            "s", lambda: fired.append("cb6"), generation=6
+        )
+        cb = adapter.pop_post_delivery_callback("s", generation=6)
+        assert callable(cb)
+        _invoke(cb)
+        assert fired == ["cb5", "cb6"]
+        assert adapter.pop_post_delivery_callback("s") is None
+
+    def test_gen7_entry_not_fired_by_gen6_pop_stays_pending(self, adapter):
+        fired = []
+        adapter.register_post_delivery_callback(
+            "s", lambda: fired.append("cb5"), generation=5
+        )
+        adapter.register_post_delivery_callback(
+            "s", lambda: fired.append("cb7"), generation=7
+        )
+        cb = adapter.pop_post_delivery_callback("s", generation=6)
+        assert callable(cb)
+        _invoke(cb)
+        assert fired == ["cb5"]
+        # gen7 still pending
+        cb2 = adapter.pop_post_delivery_callback("s", generation=7)
+        assert callable(cb2)
+        _invoke(cb2)
+        assert fired == ["cb5", "cb7"]
+

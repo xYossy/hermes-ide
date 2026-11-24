@@ -530,7 +530,29 @@ class GatewayTurnMixin:
         if getattr(type(adapter), "pop_post_delivery_callback", None) is not None:
             return adapter.pop_post_delivery_callback(key, generation=generation)
         if adapter and hasattr(adapter, "_post_delivery_callbacks"):
-            return adapter._post_delivery_callbacks.pop(key, None)
+            val = adapter._post_delivery_callbacks.pop(key, None)
+            if isinstance(val, list):
+                cbs = []
+                for _e in val:
+                    _cb = _e[1] if (isinstance(_e, tuple) and len(_e) == 2) else _e
+                    if callable(_cb):
+                        cbs.append(_cb)
+                if not cbs:
+                    return None
+                if len(cbs) == 1:
+                    return cbs[0]
+                async def _chained() -> None:
+                    for _cb in cbs:
+                        try:
+                            _r = _cb()
+                            if inspect.isawaitable(_r):
+                                await _r
+                        except Exception:
+                            logger.debug("Post-delivery callback failed", exc_info=True)
+                return _chained
+            if isinstance(val, tuple) and len(val) == 2:
+                val = val[1]
+            return val if callable(val) else None
         return None
 
     @staticmethod
@@ -8253,7 +8275,32 @@ class GatewayTurnMixin:
                             except Exception:
                                 pass
                     elif adapter and hasattr(adapter, "_post_delivery_callbacks"):
-                        _bg_cb = adapter._post_delivery_callbacks.pop(session_key, None)
+                        _raw = adapter._post_delivery_callbacks.pop(session_key, None)
+                        _cbs = []
+                        if isinstance(_raw, list):
+                            for _e in _raw:
+                                _cb = _e[1] if (isinstance(_e, tuple) and len(_e) == 2) else _e
+                                if callable(_cb):
+                                    _cbs.append(_cb)
+                        elif isinstance(_raw, tuple) and len(_raw) == 2:
+                            if callable(_raw[1]):
+                                _cbs.append(_raw[1])
+                        elif callable(_raw):
+                            _cbs.append(_raw)
+                        if len(_cbs) == 1:
+                            _bg_cb = _cbs[0]
+                        elif len(_cbs) > 1:
+                            async def _bg_chained() -> None:
+                                for _cb in _cbs:
+                                    try:
+                                        _r = _cb()
+                                        if inspect.isawaitable(_r):
+                                            await _r
+                                    except Exception:
+                                        pass
+                            _bg_cb = _bg_chained
+                        else:
+                            _bg_cb = None
                         if callable(_bg_cb):
                             try:
                                 _bg_result = _bg_cb()

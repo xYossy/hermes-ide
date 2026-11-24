@@ -2882,17 +2882,11 @@ class BasePlatformAdapter(ABC):
         fresher slot."""
         if not session_key or not callable(callback):
             return
-        existing = self._post_delivery_callbacks.get(session_key)
-        if existing is not None:
-            existing_gen, existing_cb = _split_post_delivery_entry(existing)
-            if existing_gen is not None and generation is not None and int(generation) < int(existing_gen):
-                return
-            # Same-or-newer generation: chain so both fire in registration order.
-            if callable(existing_cb) and (
-                existing_gen is None or generation is None or int(existing_gen) == int(generation)):
-                callback = self._chain_callbacks(existing_cb, callback)
-        self._post_delivery_callbacks[session_key] = (
-            callback if generation is None else (int(generation), callback))
+        # Per-generation entries never clobber each other: append instead of
+        # overwriting, so a run-generation bump cannot silently drop a pending
+        # callback registered by an earlier generation.
+        entries = self._post_delivery_callbacks.setdefault(session_key, [])
+        entries.append((None if generation is None else int(generation), callback))
 
     @staticmethod
     def _chain_callbacks(*callbacks: Callable) -> Callable[[], Awaitable[None]]:
@@ -2911,14 +2905,30 @@ class BasePlatformAdapter(ABC):
     def pop_post_delivery_callback(
         self, session_key: str, *, generation: int | None = None) -> Callable | None:
         """Pop a deferred callback, optionally requiring generation ownership."""
-        entry = self._post_delivery_callbacks.get(session_key) if session_key else None
-        if entry is None:
+        if not session_key:
             return None
-        entry_generation, callback = _split_post_delivery_entry(entry)
-        if generation is not None and (entry_generation is None or int(entry_generation) != int(generation)):
+        entries = self._post_delivery_callbacks.get(session_key)
+        if not entries:
             return None
-        self._post_delivery_callbacks.pop(session_key, None)
-        return callback if callable(callback) else None
+        if generation is None:
+            matched = list(entries)
+            remaining = []
+        else:
+            g = int(generation)
+            matched = [e for e in entries if e[0] is None or int(e[0]) <= g]
+            remaining = [e for e in entries if e[0] is not None and int(e[0]) > g]
+        if not matched:
+            return None
+        if remaining:
+            self._post_delivery_callbacks[session_key] = remaining
+        else:
+            self._post_delivery_callbacks.pop(session_key, None)
+        callbacks = [cb for (_, cb) in matched if callable(cb)]
+        if not callbacks:
+            return None
+        if len(callbacks) == 1:
+            return callbacks[0]
+        return self._chain_callbacks(*callbacks)
 
     # ── Processing lifecycle hooks (Discord 👀/✅/❌ reactions). Adapters exposing
     # ``_add_reaction(chat_id, message_id, emoji)`` / ``_remove_reaction(chat_id, message_id)``

@@ -1897,8 +1897,10 @@ class TurnRunner(_TurnRunnerCore):
                 ctx._status_adapter.register_post_delivery_callback(ctx.session_key, bg_release, generation=ctx.run_generation)
             else:
                 pdc = getattr(ctx._status_adapter, "_post_delivery_callbacks", None)
-                if pdc is not None:
-                    pdc[ctx.session_key] = bg_release
+                if isinstance(pdc, dict) and ctx.session_key:
+                    pdc.setdefault(ctx.session_key, []).append(
+                        (None if ctx.run_generation is None else int(ctx.run_generation),
+                         bg_release))
         # display.memory_notifications: off | on (generic "💾 Memory updated", default) | verbose.
         # `display:` present-but-null yields None, not the {} default (same `or {}` guard as
         # display_config.py / runtime_footer.py).
