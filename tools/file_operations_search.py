@@ -627,6 +627,40 @@ class SearchMixin:
             return False
         return root == home or common == root
 
+    def _is_filesystem_root(self, path: str) -> bool:
+        """Whether a LOCAL root normalizes to the filesystem anchor itself.
+
+        Refused on every engine, not just the shell fallbacks: even ripgrep scans
+        the whole device when matches are rare, which pins a core and pulls every
+        file through the page cache (2026-11-26: a two-hour runaway search rooted
+        at ``/`` outlived the session that started it)."""
+        from tools.environments.local import LocalEnvironment
+
+        if not isinstance(self.env, LocalEnvironment):
+            return False
+        if not os.path.isabs(path):
+            path = os.path.join(getattr(self.env, "cwd", None) or self.cwd, path)
+        normalized = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+        return normalized == os.path.normcase(os.path.abspath(os.sep))
+
+    def _content_search_root_refusal(self, path: str, has_rg: bool) -> Optional[str]:
+        """Refusal text for a content-search root that cannot be bounded, else None.
+
+        The shell grep fallback gets the same broad-root bound as the filename
+        walk (``_is_broad_local_search_root``): a root at or above ``$HOME`` has
+        no natural edge, and grep has no ignore semantics to shorten it."""
+        if self._is_filesystem_root(path):
+            return (
+                "Content search of the filesystem root is disabled: the walk has no "
+                "edge, so it pins a core and reads the whole device. Search a "
+                "specific directory instead.")
+        if not has_rg and self._is_broad_local_search_root(path):
+            return (
+                "Broad local content search without ripgrep is disabled because grep "
+                "cannot keep the traversal safely bounded. Install ripgrep or search "
+                "a narrower directory.")
+        return None
+
     def _search_files(self, pattern: str, path: str | List[str], limit: int, offset: int,
                       order: str = "discovery") -> SearchResult:
         """Search for files by name (glob-like) across one or more roots: rg --files,
@@ -637,6 +671,13 @@ class SearchMixin:
         roots = [path] if isinstance(path, str) else path
         if not roots:
             return SearchResult(error="File search requires at least one search root in 'path'.")
+
+        for root in roots:
+            if self._is_filesystem_root(root):
+                return SearchResult(error=(
+                    "File search of the filesystem root is disabled: the walk has no "
+                    "edge, so it pins a core and reads the whole device. Search a "
+                    "specific directory instead."))
 
         # Prefer ripgrep: bounded parallel traversal with ignore semantics. Resolve
         # the engine and exact-order capability BEFORE admission so a queued request
@@ -785,6 +826,9 @@ class SearchMixin:
                         limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
         """Content search: rg, else grep; attaches zero-match steering hints."""
         used_rg = self._has_command('rg')
+        refusal = self._content_search_root_refusal(path, has_rg=used_rg)
+        if refusal:
+            return SearchResult(error=refusal)
         if used_rg:
             result = self._search_with_rg(pattern, path, file_glob, limit, offset, output_mode, context,
                                           rg_executable=self._resolve_command("rg") or "rg")
