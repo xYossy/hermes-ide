@@ -38,6 +38,28 @@ class GatewayGoalCommandsMixin:
         from hermes_cli.goal_command import dispatch_goal_command
         from hermes_cli.goals import last_user_message_from_db
 
+        arg = (event.get_command_args() or "").strip().lower()
+
+        if arg == "off":
+            if not self._set_goals_disabled_for_source(event.source, True):
+                return "Could not write the profile config — goals unchanged."
+            try:
+                mgr, _session_entry = await self._get_goal_manager_for_event(event)
+                if mgr is not None:
+                    mgr.clear()
+            except Exception:
+                pass
+            self._clear_goal_continuations(event, "clear")
+            return "🎯 Goals off in this channel — /goal on re-enables. Any running goal was cleared."
+
+        if arg == "on":
+            if not self._set_goals_disabled_for_source(event.source, False):
+                return "Could not write the profile config — goals unchanged."
+            return "🎯 Goals on in this channel."
+
+        if self._goals_disabled_for_source(event.source):
+            return "Goals are disabled in this channel. /goal on re-enables."
+
         mgr, _session_entry = await self._get_goal_manager_for_event(event)
         if mgr is None:
             return t("gateway.goal.unavailable")
@@ -84,6 +106,8 @@ class GatewayGoalCommandsMixin:
         human-shaped: their text is the user's own goal wording and the non-internal head-slot
         placement is what starts the goal promptly. Best-effort: failures only logged.
         """
+        if self._goals_disabled_for_source(event.source):
+            return
         try:
             adapter, quick_key = self._adapter_and_key_for(event)
             if text and adapter and quick_key:

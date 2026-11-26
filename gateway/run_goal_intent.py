@@ -56,11 +56,14 @@ class GatewayGoalIntentMixin:
 
     def _auto_goals_enabled(self: "GatewayRunner", source) -> bool:
         """``goals.auto.enabled`` (default on) from the routed profile home, never the default's.
-        A leftover ``goals.auto.mode`` (or scalar ``goals.auto``) keeps auto-goals on."""
+        A leftover ``goals.auto.mode`` (or scalar ``goals.auto``) keeps auto-goals on.
+        Goals disabled for this source (goals.disabled_channels) turns auto-goals off too."""
         from gateway.run import _load_gateway_config
         from hermes_cli.config import cfg_get
         from utils import is_truthy_value
 
+        if self._goals_disabled_for_source(source):
+            return False
         home = Path(self._resolve_profile_home_for_source(source))
         enabled = cfg_get(_load_gateway_config(home / "config.yaml"), "goals", "auto", "enabled")
         return is_truthy_value(enabled, default=True)
