@@ -8680,6 +8680,57 @@ class GatewayTurnMixin:
                             "Failed to edit streamed message for session %s: %s",
                             session_key or "?", _edit_err,
                         )
+            elif (
+                not _is_empty_sentinel
+                and not _transformed
+                and not response.get("already_sent")
+                and "MEDIA:" not in _final
+            ):
+                # The adapter can edit but not delete (WhatsApp), so its progress bubble
+                # outlives the turn: turning it into the answer keeps a turn to one message.
+                # Gated by display.platforms.<key>.answer_in_progress; every failure falls
+                # through to the normal final send.
+                _collapse_adapter = self._delivery_adapter_for(source)
+                _bubble = None
+                if _collapse_adapter is not None:
+                    try:
+                        from gateway.run import _load_gateway_config, _platform_config_key
+                        from gateway.display_config import resolve_display_setting
+                        if resolve_display_setting(
+                            _load_gateway_config(),
+                            _platform_config_key(source.platform),
+                            "answer_in_progress",
+                        ):
+                            from hermes_cli.progress_bridge import resolve_bubble
+                            _bubble = resolve_bubble(session_key=session_key)
+                    except Exception:
+                        _bubble = None
+                if _bubble:
+                    try:
+                        _collapse_res = await _collapse_adapter.edit_message(
+                            chat_id=source.chat_id,
+                            message_id=_bubble[1],
+                            content=_final,
+                            finalize=True,
+                        )
+                        if getattr(_collapse_res, "success", False):
+                            from hermes_cli.progress_bridge import clear_bubble
+                            clear_bubble(session_key=session_key)
+                            response["already_sent"] = True
+                            logger.info(
+                                "Collapsed the final answer into the progress bubble for session %s (message %s).",
+                                session_key or "?", _bubble[1],
+                            )
+                        else:
+                            logger.warning(
+                                "Progress-bubble collapse edit failed for session %s (%s); sending normally.",
+                                session_key or "?", getattr(_collapse_res, "error", None),
+                            )
+                    except Exception as _collapse_err:
+                        logger.debug(
+                            "Progress-bubble collapse failed for session %s: %s",
+                            session_key or "?", _collapse_err,
+                        )
             elif _sc is not None and not _is_empty_sentinel:
                 # DUPLICATE-RISK DIAGNOSTIC: a stream consumer existed for this
                 # turn but suppression did NOT fire, so the gateway's normal

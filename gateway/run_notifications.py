@@ -1864,6 +1864,20 @@ class GatewayNotificationsMixin:
         adapter = self._resolve_injection_adapter(platform_name, source)
         if adapter and chat_id:
             with _log_suppressed(logging.ERROR, "Watcher delivery error: %s"):
+                # A platform without delete_message (WhatsApp) keeps one live status bubble per
+                # turn, so a process update belongs inside it rather than beside it. Fail-open:
+                # with no turn queue running the bridge returns False and the normal send below
+                # still delivers the message.
+                if getattr(type(adapter), "delete_message", None) in (None, BasePlatformAdapter.delete_message):
+                    try:
+                        from hermes_cli.progress_bridge import push_progress
+                        _line = " ".join(str(message_text or "").split())[:400]
+                        if _line and push_progress(
+                            f"\U0001F4DF {_line}", session_key=watcher.get("session_key"),
+                        ):
+                            return
+                    except Exception:
+                        pass
                 send_meta = {"thread_id": thread_id} if thread_id else None
                 await adapter.send(
                     chat_id, message_text, metadata=_non_conversational_metadata(send_meta, platform=platform_name),

@@ -720,6 +720,30 @@ class TurnRunner(_TurnRunnerCore):
             _edit_accepts_metadata=bool(ctx._progress_metadata) and _accepts_keyword(adapter.edit_message, "metadata"),
         )
 
+    def _register_progress_bubble(self, st) -> None:
+        """Remember the live bubble so a platform without delete_message can edit it later.
+
+        WhatsApp cannot delete its progress bubble, so ``cleanup_progress`` never applies
+        there and the bubble outlives the turn. Recording (chat_id, message_id) lets the
+        final-delivery path turn that bubble into the answer instead of sending a second
+        message. Fail-open: no id, or no bridge, changes nothing.
+        """
+        adapter = st.adapter
+        if adapter is None or not st.progress_msg_id:
+            return
+        # A platform that deletes its bubbles needs no collapse; it cleans up instead.
+        if getattr(type(adapter), "delete_message", None) not in (None, BasePlatformAdapter.delete_message):
+            return
+        try:
+            from hermes_cli.progress_bridge import register_bubble
+            register_bubble(
+                session_key=self._ctx.session_key,
+                chat_id=self._ctx.source.chat_id,
+                message_id=st.progress_msg_id,
+            )
+        except Exception:
+            logger.debug("[%s] progress bubble registration failed", getattr(adapter, "name", "?"), exc_info=True)
+
     async def _edit_progress_message(self, st, message_id: str, content: str):
         ctx = self._ctx
         kwargs = {"chat_id": ctx.source.chat_id, "message_id": message_id, "content": content}
@@ -800,6 +824,7 @@ class TurnRunner(_TurnRunnerCore):
             result = await self._send_progress_text(st, self._progress_text(st, group))
             if result.success and result.message_id:
                 st.progress_msg_id = result.message_id
+                self._register_progress_bubble(st)
         # The newest continuation is the only mutable bubble: keep just its lines so later
         # edits update it instead of replaying the full transcript into new messages.
         if st._row_tail:
@@ -1138,6 +1163,7 @@ class TurnRunner(_TurnRunnerCore):
                 st._delivered_rows = len(st.progress_lines)
             if result.message_id:
                 st.progress_msg_id = result.message_id
+                self._register_progress_bubble(st)
         return True
 
     async def send_progress_messages(self):
