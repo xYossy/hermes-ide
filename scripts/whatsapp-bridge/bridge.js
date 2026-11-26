@@ -24,7 +24,7 @@ import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import path from 'path';
-import { mkdirSync, readFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { randomBytes, createHash } from 'crypto';
 import { execFileSync } from 'child_process';
@@ -91,6 +91,27 @@ const SEND_READ_RECEIPTS =
 
 const PORT = parseInt(getArg('port', '3000'), 10);
 const SESSION_DIR = getArg('session', path.join(process.env.HOME || '~', '.hermes', 'whatsapp', 'session'));
+
+// Status audience: Baileys 7 keeps no contact store, so collect every jid we ever see
+// (history-sync contacts, message senders, group participants) into one file.
+const STATUS_JIDS_FILE = path.join(SESSION_DIR, 'status-audience.json');
+const statusJids = new Set();
+function loadStatusJids() {
+  try {
+    for (const jid of JSON.parse(readFileSync(STATUS_JIDS_FILE, 'utf8'))) statusJids.add(jid);
+  } catch {}
+}
+function rememberStatusJid(raw) {
+  const jid = jidNormalizedUser(raw || '');
+  if (!jid.endsWith('@s.whatsapp.net') || statusJids.has(jid)) return;
+  statusJids.add(jid);
+  try {
+    mkdirSync(SESSION_DIR, { recursive: true });
+    writeFileSync(STATUS_JIDS_FILE, JSON.stringify([...statusJids]));
+  } catch {}
+}
+loadStatusJids();
+
 // Cache directories: the Python gateway passes the profile-aware paths via
 // env (HERMES_HOME-aware, new cache/ layout).  Fall back to the legacy
 // hardcoded locations for bridges launched outside the gateway.
@@ -515,6 +536,10 @@ async function startSocket() {
     }
   });
 
+  sock.ev.on('messaging-history.set', ({ contacts }) => {
+    for (const contact of contacts || []) rememberStatusJid(contact.id);
+  });
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     // In self-chat mode, your own messages commonly arrive as 'append' rather
     // than 'notify'. Accept both and filter agent echo-backs below.
@@ -527,6 +552,8 @@ async function startSocket() {
 
     for (const msg of messages) {
       if (!msg.message) continue;
+      rememberStatusJid(msg.key?.remoteJid);
+      rememberStatusJid(msg.key?.participant);
 
       const chatId = msg.key.remoteJid;
       const senderId = msg.key.participant || chatId;
@@ -1170,6 +1197,64 @@ app.get('/group-invite', async (req, res) => {
       return res.status(500).json({ error: 'WhatsApp returned no invite code (not admin, or invite revoked)' });
     }
     res.json({ code, url: `https://chat.whatsapp.com/${code}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Post a text WhatsApp Status (story). Audience: explicit jids, else group participants.
+app.post('/status', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { text, audience, dryRun, backgroundColor = '#0A1014' } = req.body;
+  if (!text) {
+    return res.status(400).json({ error: 'text is required' });
+  }
+
+  try {
+    let statusJidList = Array.isArray(audience) ? audience.filter(Boolean) : [];
+    if (!statusJidList.length) {
+      // Union of history-sync contacts, senders we have seen, group participants and ourself.
+      const seen = new Set(statusJids);
+      const self = jidNormalizedUser(sock.user?.id || '');
+      if (self) seen.add(self);
+      for (const number of ALLOWED_USERS) {
+        if (number) seen.add(String(number) + '@s.whatsapp.net');
+      }
+      try {
+        const groups = await sock.groupFetchAllParticipating();
+        for (const group of Object.values(groups || {})) {
+          for (const participant of group.participants || []) {
+            const jid = jidNormalizedUser(participant.id || '');
+            if (jid && jid.endsWith('@s.whatsapp.net')) seen.add(jid);
+          }
+        }
+      } catch (err) {
+        console.warn('status audience: group fetch failed:', err?.message || err);
+      }
+      statusJidList = [...seen];
+    }
+
+    if (!statusJidList.length) {
+      return res.status(400).json({ error: 'no audience available' });
+    }
+
+    if (dryRun) {
+      return res.json({ success: true, dryRun: true, audience: statusJidList.length });
+    }
+
+    const sent = await sendWithTimeout('status@broadcast', { text }, {
+      statusJidList,
+      backgroundColor,
+    });
+
+    res.json({
+      success: true,
+      messageId: sent?.key?.id || null,
+      audience: statusJidList.length,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

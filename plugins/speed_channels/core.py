@@ -106,6 +106,22 @@ def _read_env_key(path: Path, key: str) -> str:
     raise SpeedChannelsError(f"{key} missing in {path}")
 
 
+def configured_downloaders(config: Mapping[str, Any]) -> List[str]:
+    """Downloaders this tick may poll: a channel is configured and creds exist.
+
+    Either half missing means "not configured", so the downloader is skipped,
+    not fatal. A missing secrets file used to raise inside the poll, which
+    aborted the whole tick before ``save_state`` and before the category
+    rename, freezing the statusbar label along with the wall channels.
+    """
+    channel_ids = config.get("channel_ids") or {}
+    return [
+        key
+        for key, _label in DOWNLOADERS
+        if channel_ids.get(key) and _secret_env(f"{key}.env").exists()
+    ]
+
+
 # Env var holding the bot token in HERMES_HOME/secrets/discord.env, same
 # source as home_server/quota_channels. A constant so tests reference the key
 # instead of re-typing the literal.
@@ -174,14 +190,13 @@ def validate_speed_config(section: Mapping[str, Any]) -> dict:
     if not isinstance(channel_ids, Mapping):
         raise SpeedChannelsError("speed_channels.channel_ids must be a mapping")
 
+    # A downloader channel is optional: without both a channel id and its
+    # secrets file that downloader is simply not polled (see run_tick).
     resolved: Dict[str, str] = {}
     for key, _label in DOWNLOADERS:
         channel_id = channel_ids.get(key)
-        if not channel_id:
-            raise SpeedChannelsError(
-                f"speed_channels.channel_ids.{key} required"
-            )
-        resolved[key] = str(channel_id)
+        if channel_id:
+            resolved[key] = str(channel_id)
 
     return {
         "guild_id": str(guild_id),
@@ -627,13 +642,24 @@ def run_tick(
 
     did_poll = False
     names: Dict[str, str] = {}
-    if poll_due(state, interval, force=force, now_fn=now_fn):
-        qbit_dl, _qbit_up, qbit_queue = qbit_speeds(http_fn)
-        sab_dl, sab_queue = sab_speed(http_fn)
-        slsk_dl, slsk_up, slsk_queue = slskd_speeds(http_fn)
-        names = channel_names(
-            qbit_dl, qbit_queue, sab_dl, sab_queue, slsk_dl, slsk_up, slsk_queue
+    ready = configured_downloaders(config)
+    if poll_due(state, interval, force=force, now_fn=now_fn) and ready:
+        qbit_dl, _qbit_up, qbit_queue = (
+            qbit_speeds(http_fn) if "qbittorrent" in ready else (0.0, 0.0, 0)
         )
+        sab_dl, sab_queue = (
+            sab_speed(http_fn) if "sabnzbd" in ready else (0.0, 0)
+        )
+        slsk_dl, slsk_up, slsk_queue = (
+            slskd_speeds(http_fn) if "slskd" in ready else (0.0, 0.0, 0)
+        )
+        names = {
+            key: name
+            for key, name in channel_names(
+                qbit_dl, qbit_queue, sab_dl, sab_queue, slsk_dl, slsk_up, slsk_queue
+            ).items()
+            if key in ready
+        }
         for key, name in names.items():
             rename_channel(config["channel_ids"][key], name, headers, http_fn=http_fn)
         last = float(now_fn())

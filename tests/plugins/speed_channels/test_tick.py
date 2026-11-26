@@ -88,6 +88,23 @@ def test_a_failing_downloader_leaves_state_and_channels_untouched(
     assert transport.patch_calls == before_patches
 
 
+def test_an_unconfigured_downloader_is_skipped_not_fatal(
+    hermes, config, transport, now, ping
+):
+    # The live failure: a missing secrets file aborted the tick inside the
+    # poll, so save_state and the category rename never ran either.
+    (hermes / "secrets" / "qbittorrent.env").unlink()
+
+    report = run_tick(config, now_fn=now, http_fn=transport, ping_fn=ping)
+
+    assert report["success"] is True
+    assert report["did_poll"] is True
+    assert set(report["names"]) == {"sabnzbd", "slskd"}
+    assert report["category"] == "renamed"
+    # No credentials, no number: its channel must stay untouched.
+    assert "cq" not in dict(transport.patched)
+
+
 def test_category_label_tracks_poll_success_even_when_poll_skipped(
     hermes, config, transport, now, ping
 ):

@@ -45,6 +45,84 @@ class GatewayGoalsMixin:
         except Exception:
             return 20
 
+    def _goals_disabled_for_source(self, source) -> bool:
+        """Whether goals are muted for *source*'s channel (and its threads)."""
+        try:
+            from gateway.run import _load_gateway_config
+            from hermes_cli.config import cfg_get
+            from pathlib import Path
+
+            home = Path(self._resolve_profile_home_for_source(source))
+            data = _load_gateway_config(home / "config.yaml")
+            value = cfg_get(data, "goals", "disabled_channels")
+            if isinstance(value, str):
+                ids = [x.strip() for x in value.replace(",", " ").split() if x.strip()]
+            elif isinstance(value, (list, tuple, set)):
+                ids = [str(x).strip() for x in value if str(x).strip()]
+            else:
+                return False
+            chat_id = str(getattr(source, "chat_id", "") or "")
+            parent_chat_id = str(getattr(source, "parent_chat_id", "") or "")
+            wanted = {chat_id, parent_chat_id} - {""}
+            return bool(wanted & set(ids))
+        except Exception:
+            return False
+
+    def _set_goals_disabled_for_source(self, source, disabled: bool) -> bool:
+        """Append/remove *source*'s chat id in goals.disabled_channels. Fail closed."""
+        try:
+            from gateway.run import _load_gateway_config  # noqa: F401
+            from hermes_cli.config import (
+                atomic_config_write,
+                require_readable_config_before_write,
+            )
+            from pathlib import Path
+
+            home = Path(self._resolve_profile_home_for_source(source))
+            path = home / "config.yaml"
+            data = require_readable_config_before_write(path)
+            if not isinstance(data, dict):
+                data = {}
+            goals = data.get("goals")
+            if not isinstance(goals, dict):
+                goals = {}
+            disabled_value = goals.get("disabled_channels")
+            if isinstance(disabled_value, str):
+                ids = [x.strip() for x in disabled_value.replace(",", " ").split() if x.strip()]
+            elif isinstance(disabled_value, (list, tuple, set)):
+                ids = [str(x).strip() for x in disabled_value if str(x).strip()]
+            else:
+                ids = []
+
+            chat_id = str(getattr(source, "chat_id", "") or "")
+            if disabled:
+                if chat_id and chat_id not in ids:
+                    ids.append(chat_id)
+            else:
+                ids = [x for x in ids if x != chat_id]
+
+            # Dedup while preserving order.
+            seen = set()
+            deduped = []
+            for x in ids:
+                if x not in seen:
+                    seen.add(x)
+                    deduped.append(x)
+            ids = deduped
+
+            if ids:
+                goals["disabled_channels"] = ids
+            else:
+                goals.pop("disabled_channels", None)
+            if goals:
+                data["goals"] = goals
+            else:
+                data.pop("goals", None)
+            atomic_config_write(path, data)
+            return True
+        except Exception:
+            return False
+
     async def _warm_goals_session_db(self, label: str) -> None:
         """Warm the goals SessionDB cache off-loop (best-effort): a cold cache runs the state.db
         init on the loop thread and freezes the loop. The executor hop keeps the profile home

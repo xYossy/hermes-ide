@@ -44,7 +44,6 @@ def test_poll_interval_is_respected():
     [
         (_section(guild_id=""), "guild_id"),
         (_section(category_id=None), "category_id"),
-        (_section(channel_ids={"qbittorrent": "cq"}), "sabnzbd"),
         (_section(channel_ids="nope"), "channel_ids"),
         ("not a mapping", "mapping"),
     ],
@@ -52,6 +51,12 @@ def test_poll_interval_is_respected():
 def test_missing_pieces_are_named(section, complaint):
     with pytest.raises(SpeedChannelsError, match=complaint):
         validate_speed_config(section)
+
+
+def test_a_downloader_channel_may_be_absent():
+    """An unconfigured downloader resolves away instead of failing validation."""
+    resolved = validate_speed_config(_section(channel_ids={"qbittorrent": "cq"}))
+    assert resolved["channel_ids"] == {"qbittorrent": "cq"}
 
 
 def test_load_from_hermes_home_config(hermes):
